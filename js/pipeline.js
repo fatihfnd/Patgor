@@ -3,18 +3,45 @@
  *
  * Tek dışa aktarım: Pipeline.process(srcCanvas, opts, onProgress) → { imgData, stainType }
  * Pipeline.setPreset(name), Pipeline.setCustomRef(bgrMat)
- *
- * Her adımın başında console.log var.
- * Her cv.Mat sonunda delete() ile temizleniyor.
- * Her adım kendi içinde try/catch — hata olursa adım atlanır, zincir devam eder.
  */
 
 const Pipeline = (() => {
 
-  /* ── UI thread'i serbest bırak ───────────────────────────── */
+  /* ══════════════════════════════════════════════════════════
+     HASSAS AYAR SABİTLERİ — buradan kolayca ince ayar yapılır
+     ══════════════════════════════════════════════════════════ */
+  const TUNE = {
+    // Flat-field
+    flatKernelFrac:    0.25,   // kernel = kısa kenar × oran — büyük → halo yok
+    flatStrengthDef:   28,     // varsayılan güç (0-100); UI slider değeri geçer
+
+    // Beyaz dengesi — parlak arka plan hedefi (255'e yakma)
+    wbTarget:          245,
+
+    // Reinhard normalizasyon karıştırma (0=orijinal, 1=tam normalize)
+    normBlend:         0.65,   // eozin aşırı doygunlaşmasın
+
+    // Gölge tabanı — siyah 0'dan bu değere kaldırılır (kromatin detayı)
+    shadowBase:        6,
+
+    // CLAHE
+    claheClip:         1.5,    // 3.0 fazla agresifti
+    claheTile:         8,
+
+    // Arka plan / doku maskesi (HSV değerleri, 0-255 ölçeği)
+    bgSatMax:          35,     // doygunluk < bu → arka plan
+    bgValMin:          195,    // parlaklık > bu → arka plan
+    bgFeatherPx:       21,     // kenar yumuşatma yarıçapı (px, tek sayı)
+    bgSmoothKernel:    9,      // arka plan temizleme kernel
+
+    // Parlaklık koruması
+    brightnessCompMax: 1.12,   // maksimum telafi katsayısı (aşırı aydınlatmayı önler)
+  };
+  /* ══════════════════════════════════════════════════════════ */
+
   const yieldUI = () => new Promise(r => setTimeout(r, 0));
 
-  /* ── Yardımcılar ─────────────────────────────────────────── */
+  /* ── Canvas ↔ Mat dönüşümleri ────────────────────────────── */
   function canvasToMat(canvas) {
     const imgData = canvas.getContext('2d')
       .getImageData(0, 0, canvas.width, canvas.height);
@@ -22,7 +49,7 @@ const Pipeline = (() => {
     const bgr  = new cv.Mat();
     cv.cvtColor(rgba, bgr, cv.COLOR_RGBA2BGR);
     rgba.delete();
-    return bgr; // CV_8UC3
+    return bgr;
   }
 
   function matToImageData(bgr) {
@@ -36,26 +63,46 @@ const Pipeline = (() => {
     return out;
   }
 
+  /* ── İstatistik yardımcıları ─────────────────────────────── */
+  function meanLuminance(bgr) {
+    const lab = new cv.Mat();
+    cv.cvtColor(bgr, lab, cv.COLOR_BGR2Lab);
+    const m = cv.mean(lab);
+    lab.delete();
+    return m[0];  // L kanalı ortalaması
+  }
+
+  function meanSaturation(bgr) {
+    const hsv = new cv.Mat();
+    cv.cvtColor(bgr, hsv, cv.COLOR_BGR2HSV);
+    const chs = new cv.MatVector();
+    cv.split(hsv, chs);
+    const mS = cv.mean(chs.get(1))[0];
+    for (let i = 0; i < 3; i++) chs.get(i).delete();
+    chs.delete(); hsv.delete();
+    return mS;
+  }
+
   /* ── Adım 1: Flat-field / vinyetleme ────────────────────── */
+  // Büyük kernel (kısa kenar × 0.25) → global ışık gradyanını tahmin eder,
+  // lokal detayları korur → halo oluşmaz
   function flatFieldCorrection(src, strength) {
-    console.log('[pipeline] 1- flat-field  strength=' + strength);
+    console.log('[pipeline] 1- flat-field strength=' + strength);
     if (strength === 0) return src.clone();
 
-    let k = Math.round(Math.min(src.cols, src.rows) * 0.15);
+    let k = Math.round(Math.min(src.cols, src.rows) * TUNE.flatKernelFrac);
     if (k < 3) k = 3;
     if (k % 2 === 0) k += 1;
 
-    const blurred = new cv.Mat();
-    cv.GaussianBlur(src, blurred, new cv.Size(k, k), 0);
-
-    const srcF   = new cv.Mat();
-    const blurF  = new cv.Mat();
+    const srcF = new cv.Mat();
     src.convertTo(srcF, cv.CV_32F);
-    blurred.convertTo(blurF, cv.CV_32F);
-    blurred.delete();
 
-    const meanVal  = cv.mean(blurF);
-    const mb = (meanVal[0] + meanVal[1] + meanVal[2]) / 3 || 128;
+    const blurF = new cv.Mat();
+    cv.GaussianBlur(srcF, blurF, new cv.Size(k, k), 0);
+
+    // Orijinal ortalama parlaklık → bölme sonrası yeniden ölçekle
+    const origMean = cv.mean(srcF);
+    const mb = (origMean[0] + origMean[1] + origMean[2]) / 3 || 128;
 
     const corrF = new cv.Mat();
     cv.divide(srcF, blurF, corrF, mb);
@@ -67,40 +114,39 @@ const Pipeline = (() => {
 
     if (strength >= 100) return corr8;
 
-    const alpha = strength / 100;
-    cv.addWeighted(corr8, alpha, src, 1 - alpha, 0, corr8);
-    return corr8;
+    const alpha  = strength / 100;
+    const result = new cv.Mat();
+    cv.addWeighted(corr8, alpha, src, 1 - alpha, 0, result);
+    corr8.delete();
+    return result;
   }
 
-  /* ── Adım 2: Beyaz dengesi (parlak piksel / lam camı arka planı) ── */
-  // Gray World H&E için yanlış: tüm kanal ortalamalarını eşitleyerek
-  // hematoksilen/eozin renklerini siler. Bunun yerine arka planı
-  // (en parlak %10 piksel = boş lam camı = gerçek beyaz) beyaza çek.
+  /* ── Adım 2: Beyaz dengesi (parlak piksel) ───────────────── */
+  // Gray World H&E için yanlış (renkleri siler).
+  // Bunun yerine: en parlak pikseller = boş lam camı = gerçek beyaz.
+  // Hedef: wbTarget (~245) — 255'e yakılmaz, highlight clipping önlenir.
   function whiteBalance(src) {
-    console.log('[pipeline] 2- beyaz dengesi (parlak piksel)');
+    console.log('[pipeline] 2- beyaz dengesi (hedef=' + TUNE.wbTarget + ')');
 
-    // Gri görüntü üzerinden parlaklık maskesi
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_BGR2GRAY);
     const mmRes = cv.minMaxLoc(gray);
-    // Eşik: maksimum parlaklığın %85'i — lam camı (boş alan) pikselleri
-    const thr = Math.max(180, mmRes.maxVal * 0.85);
-    const mask = new cv.Mat();
+    const thr   = Math.max(180, mmRes.maxVal * 0.85);
+    const mask  = new cv.Mat();
     cv.threshold(gray, mask, thr, 255, cv.THRESH_BINARY);
     gray.delete();
 
-    // Parlak bölgelerdeki kanal ortalamalarını ölç
     const inChs = new cv.MatVector();
     cv.split(src, inChs);
-    const brightMeans = [0, 1, 2].map(i => cv.mean(inChs.get(i), mask)[0] || 220);
+    const brightMeans = [0, 1, 2].map(
+      i => cv.mean(inChs.get(i), mask)[0] || TUNE.wbTarget
+    );
     mask.delete();
 
-    // Her kanalı hedef beyaza (220) çek
-    const TARGET = 220;
     const outChs = new cv.MatVector();
     cv.split(src, outChs);
     for (let i = 0; i < 3; i++) {
-      const sc = brightMeans[i] > 10 ? TARGET / brightMeans[i] : 1;
+      const sc = brightMeans[i] > 10 ? TUNE.wbTarget / brightMeans[i] : 1;
       outChs.get(i).convertTo(outChs.get(i), -1, sc, 0);
       inChs.get(i).delete();
     }
@@ -110,8 +156,87 @@ const Pipeline = (() => {
     for (let i = 0; i < 3; i++) outChs.get(i).delete();
     inChs.delete(); outChs.delete();
 
-    console.log('[pipeline] 2- beyaz dengesi tamamlandı, arka plan ortalamaları:',
+    console.log('[pipeline] 2- WB arka plan ortalamaları:',
       brightMeans.map(v => v.toFixed(1)));
+    return result;
+  }
+
+  /* ── Arka plan / doku maskesi ────────────────────────────── */
+  // HSV: düşük doygunluk + yüksek parlaklık → boş lam camı (arka plan)
+  // Döndürür: CV_32F tek kanal, 1=arka plan, 0=doku (yumuşak kenarlar)
+  function computeBackgroundMask(bgr) {
+    const hsv = new cv.Mat();
+    cv.cvtColor(bgr, hsv, cv.COLOR_BGR2HSV);
+    const chs = new cv.MatVector();
+    cv.split(hsv, chs);
+    hsv.delete();
+
+    const satMask = new cv.Mat();
+    const valMask = new cv.Mat();
+    cv.threshold(chs.get(1), satMask, TUNE.bgSatMax, 255, cv.THRESH_BINARY_INV);
+    cv.threshold(chs.get(2), valMask, TUNE.bgValMin, 255, cv.THRESH_BINARY);
+    for (let i = 0; i < 3; i++) chs.get(i).delete();
+    chs.delete();
+
+    const bgMask8 = new cv.Mat();
+    cv.bitwise_and(satMask, valMask, bgMask8);
+    satMask.delete(); valMask.delete();
+
+    // Float'a çevir → kenarları yumuşat (feather) → doku-arka plan sınırı yumuşak
+    const bgMaskF = new cv.Mat();
+    bgMask8.convertTo(bgMaskF, cv.CV_32F, 1.0 / 255);
+    bgMask8.delete();
+
+    const r       = TUNE.bgFeatherPx | 1;  // tek sayı
+    const blurred = new cv.Mat();
+    cv.GaussianBlur(bgMaskF, blurred, new cv.Size(r, r), r / 3.0);
+    bgMaskF.delete();
+
+    const bgPct = (cv.mean(blurred)[0] * 100).toFixed(1);
+    const dkPct = (100 - parseFloat(bgPct)).toFixed(1);
+    console.log('[pipeline] maske: arka plan=' + bgPct + '%  doku=' + dkPct + '%');
+
+    return blurred;   // 0=doku, 1=arka plan, yumuşak geçiş
+  }
+
+  /* ── Maske ile karıştır ──────────────────────────────────── */
+  // result = tissueImg × (1-bgMask) + bgImg × bgMask
+  // bgMask CV_32F, tek kanal, 0=doku, 1=arka plan
+  function blendWithMask(tissueImg, bgImg, bgMaskF32) {
+    const tissueF = new cv.Mat();
+    const bgF     = new cv.Mat();
+    tissueImg.convertTo(tissueF, cv.CV_32F);
+    bgImg.convertTo(bgF, cv.CV_32F);
+
+    // Tek kanallı maskeyi 3 kanala genişlet
+    const m0 = bgMaskF32.clone();
+    const m1 = bgMaskF32.clone();
+    const m2 = bgMaskF32.clone();
+    const mv  = new cv.MatVector();
+    mv.push_back(m0); mv.push_back(m1); mv.push_back(m2);
+    const mask3 = new cv.Mat();
+    cv.merge(mv, mask3);
+    m0.delete(); m1.delete(); m2.delete(); mv.delete();
+
+    // invMask = 1 - mask
+    const ones3    = new cv.Mat(mask3.rows, mask3.cols, cv.CV_32FC3, new cv.Scalar(1, 1, 1, 0));
+    const invMask3 = new cv.Mat();
+    cv.subtract(ones3, mask3, invMask3);
+    ones3.delete();
+
+    const t3 = new cv.Mat();
+    const b3 = new cv.Mat();
+    cv.multiply(tissueF, invMask3, t3);
+    cv.multiply(bgF,     mask3,    b3);
+    tissueF.delete(); bgF.delete(); invMask3.delete(); mask3.delete();
+
+    const resultF = new cv.Mat();
+    cv.add(t3, b3, resultF);
+    t3.delete(); b3.delete();
+
+    const result = new cv.Mat();
+    resultF.convertTo(result, cv.CV_8U);
+    resultF.delete();
     return result;
   }
 
@@ -125,7 +250,6 @@ const Pipeline = (() => {
     hsv.delete();
 
     const rows = chs.get(0).rows, cols = chs.get(0).cols;
-    // Hue 10-22 AND Saturation >60 → DAB kahve
     const loH = new cv.Mat(rows, cols, cv.CV_8U, new cv.Scalar(10));
     const hiH = new cv.Mat(rows, cols, cv.CV_8U, new cv.Scalar(22));
     const loS = new cv.Mat(rows, cols, cv.CV_8U, new cv.Scalar(60));
@@ -142,12 +266,11 @@ const Pipeline = (() => {
     chs.delete();
 
     const type = dabRatio > 0.03 ? 'ihk' : 'he';
-    console.log('[pipeline] 3- boya algılama sonuç=' + type + ' dabRatio=' + dabRatio.toFixed(4));
+    console.log('[pipeline] 3- boya=' + type + ' dabRatio=' + dabRatio.toFixed(4));
     return type;
   }
 
-  /* ── Adım 4: Reinhard boya normalizasyonu ────────────────── */
-  // OpenCV Lab 8U: L∈[0,255], a∈[0,255] (128=nötr), b∈[0,255] (128=nötr)
+  /* ── Adım 4: Reinhard normalizasyon ─────────────────────── */
   const PRESETS = {
     he_scanner: {
       meanL: 190, stdL: 40,
@@ -167,7 +290,7 @@ const Pipeline = (() => {
   function setPreset(name) {
     activePreset   = name;
     customRefStats = null;
-    console.log('[pipeline] preset değişti: ' + name);
+    console.log('[pipeline] preset: ' + name);
   }
 
   function chStats(ch32f) {
@@ -180,7 +303,7 @@ const Pipeline = (() => {
   }
 
   function bgrToLabF(bgr) {
-    const lab8 = new cv.Mat();
+    const lab8  = new cv.Mat();
     cv.cvtColor(bgr, lab8, cv.COLOR_BGR2Lab);
     const lab32 = new cv.Mat();
     lab8.convertTo(lab32, cv.CV_32F);
@@ -208,15 +331,17 @@ const Pipeline = (() => {
   function setCustomRef(bgr) {
     try {
       customRefStats = computeLabStats(bgr);
-      console.log('[pipeline] özel referans istatistikleri hesaplandı', customRefStats);
+      console.log('[pipeline] özel ref istatistikleri:', customRefStats);
     } catch (e) {
       console.error('[pipeline] setCustomRef hatası:', e);
       customRefStats = null;
     }
   }
 
+  // normBlend: normalize ile orijinali karıştır → eozin aşırı doygunlaşmaz
   function reinhardNormalize(src, hemaScale, eosinScale) {
-    console.log('[pipeline] 4- normalizasyon  hema=' + hemaScale + ' eosin=' + eosinScale);
+    console.log('[pipeline] 4- normalizasyon  hema=' + hemaScale
+      + ' eosin=' + eosinScale + ' blend=' + TUNE.normBlend);
     const ref = customRefStats || PRESETS[activePreset];
 
     const lab32 = bgrToLabF(src);
@@ -225,15 +350,14 @@ const Pipeline = (() => {
     lab32.delete();
 
     const names      = ['L', 'A', 'B'];
-    // Kullanıcı kaydırıcıları sadece a/b kanallarını ölçekler
     const userScales = [1.0, hemaScale / 100, eosinScale / 100];
 
     for (let i = 0; i < 3; i++) {
       const ch = chs.get(i);
       const { mean: sM, std: sS } = chStats(ch);
-      const rM  = ref['mean' + names[i]];
-      const rS  = ref['std'  + names[i]] || 1;
-      const sc  = (rS / sS) * userScales[i];
+      const rM = ref['mean' + names[i]];
+      const rS = ref['std'  + names[i]] || 1;
+      const sc = (rS / sS) * userScales[i];
       ch.convertTo(ch, -1, sc, -sM * sc + rM);
     }
 
@@ -246,17 +370,19 @@ const Pipeline = (() => {
     merged32.convertTo(merged8, cv.CV_8U);
     merged32.delete();
 
-    const result = new cv.Mat();
-    cv.cvtColor(merged8, result, cv.COLOR_Lab2BGR);
+    const normResult = new cv.Mat();
+    cv.cvtColor(merged8, normResult, cv.COLOR_Lab2BGR);
     merged8.delete();
-    return result;
+
+    // normBlend × normalize + (1-normBlend) × orijinal
+    const blended = new cv.Mat();
+    cv.addWeighted(normResult, TUNE.normBlend, src, 1 - TUNE.normBlend, 0, blended);
+    normResult.delete();
+    return blended;
   }
 
-  /* ── Adım 5: CLAHE kontrast ──────────────────────────────── */
-  // CLAHE API OpenCV.js build'ine göre değişiyor:
-  //   4.5 öncesi: new cv.CLAHE(clipLimit, tileSize)
-  //   bazı build: cv.createCLAHE(clipLimit, tileSize)
-  //   hiçbiri yoksa: cv.normalize ile fallback
+  /* ── Adım 5a: CLAHE kontrast ─────────────────────────────── */
+  // API build'e göre değişiyor → üç yol dene, hiçbiri yoksa normalize fallback
   function _makeCLAHE(clipLimit, tileSize) {
     if (typeof cv.CLAHE === 'function') {
       try {
@@ -264,12 +390,11 @@ const Pipeline = (() => {
         if (typeof c.apply === 'function') { console.log('[pipeline] CLAHE: new cv.CLAHE'); return c; }
         c.delete && c.delete();
       } catch (_) {}
-      // Bazı build'lerde arg'sız constructor, sonra setter
       try {
         const c = new cv.CLAHE();
         if (c.setClipLimit)     c.setClipLimit(clipLimit);
         if (c.setTilesGridSize) c.setTilesGridSize(tileSize);
-        if (typeof c.apply === 'function') { console.log('[pipeline] CLAHE: new cv.CLAHE() + setters'); return c; }
+        if (typeof c.apply === 'function') { console.log('[pipeline] CLAHE: cv.CLAHE()+setters'); return c; }
         c.delete && c.delete();
       } catch (_) {}
     }
@@ -284,14 +409,14 @@ const Pipeline = (() => {
   }
 
   function applyCLAHE(src) {
-    console.log('[pipeline] 5- kontrast (CLAHE)');
+    console.log('[pipeline] 5a- CLAHE clipLimit=' + TUNE.claheClip + ' tile=' + TUNE.claheTile);
     const lab8 = new cv.Mat();
     cv.cvtColor(src, lab8, cv.COLOR_BGR2Lab);
     const chs = new cv.MatVector();
     cv.split(lab8, chs);
     lab8.delete();
 
-    const clahe = _makeCLAHE(3.0, new cv.Size(8, 8));
+    const clahe = _makeCLAHE(TUNE.claheClip, new cv.Size(TUNE.claheTile, TUNE.claheTile));
     if (clahe) {
       const lOut = new cv.Mat();
       clahe.apply(chs.get(0), lOut);
@@ -299,8 +424,7 @@ const Pipeline = (() => {
       lOut.delete();
       clahe.delete();
     } else {
-      // Fallback: L kanalını histogram gererek normalize et
-      console.warn('[pipeline] CLAHE API bulunamadı, normalize fallback kullanılıyor');
+      console.warn('[pipeline] CLAHE API yok, normalize fallback');
       const lNorm = new cv.Mat();
       cv.normalize(chs.get(0), lNorm, 0, 255, cv.NORM_MINMAX);
       lNorm.copyTo(chs.get(0));
@@ -320,15 +444,24 @@ const Pipeline = (() => {
 
   /* ── Adım 5b: Unsharp mask keskinleştirme ────────────────── */
   function unsharpMask(src, amount) {
-    console.log('[pipeline] 5- keskinlik amount=' + amount);
+    console.log('[pipeline] 5b- keskinlik amount=' + amount);
     if (amount === 0) return src.clone();
     const blur   = new cv.Mat();
     cv.GaussianBlur(src, blur, new cv.Size(5, 5), 2);
     const result = new cv.Mat();
-    const a = 1 + amount / 100;
-    const b = -(amount / 100);
-    cv.addWeighted(src, a, blur, b, 0, result);
+    cv.addWeighted(src, 1 + amount / 100, blur, -(amount / 100), 0, result);
     blur.delete();
+    return result;
+  }
+
+  /* ── Adım 6: Gölge tabanı ────────────────────────────────── */
+  // [0,255] → [shadowBase, 255]: siyah 0'dan shadowBase'e kaldırılır.
+  // Kromatin ve nükleer detay korunur; siyaha yapışma önlenir.
+  function liftShadows(src) {
+    if (TUNE.shadowBase <= 0) return src.clone();
+    const result = new cv.Mat();
+    const scale  = (255 - TUNE.shadowBase) / 255;
+    src.convertTo(result, -1, scale, TUNE.shadowBase);
     return result;
   }
 
@@ -337,7 +470,6 @@ const Pipeline = (() => {
     console.log('[pipeline] manuel ayarlar');
     let mat = src.clone();
 
-    // Parlaklık / kontrast
     const alpha = 1 + (opts.contrast  || 0) / 100;
     const beta  =     (opts.brightness || 0);
     if (Math.abs(alpha - 1) > 0.001 || Math.abs(beta) > 0.001) {
@@ -347,7 +479,6 @@ const Pipeline = (() => {
       mat = adj;
     }
 
-    // Doygunluk
     if (opts.saturation) {
       const hsv = new cv.Mat();
       cv.cvtColor(mat, hsv, cv.COLOR_BGR2HSV);
@@ -360,7 +491,6 @@ const Pipeline = (() => {
       chs.delete(); hsv.delete();
     }
 
-    // Renk sıcaklığı
     if (opts.temperature) {
       const chs = new cv.MatVector();
       cv.split(mat, chs);
@@ -375,82 +505,162 @@ const Pipeline = (() => {
     return mat;
   }
 
-  /* ── Ana işleme fonksiyonu ───────────────────────────────── */
+  /* ══════════════════════════════════════════════════════════
+     ANA İŞLEME FONKSİYONU
+     ══════════════════════════════════════════════════════════ */
   async function process(srcCanvas, opts, onProgress) {
     const report = (pct, msg) => { if (onProgress) onProgress(pct, msg); };
 
-    console.log('[pipeline] --- işleme başladı ---', opts);
+    console.log('[pipeline] ─── işleme başladı ───', opts);
     report(5, 'Görüntü okunuyor…');
     let mat = canvasToMat(srcCanvas);
     await yieldUI();
+
+    // Her adım için güvenli sarmalayıcı — hata olsa bile zincir devam eder
+    const logBGR = (label) => {
+      try {
+        const m = cv.mean(mat);
+        console.log('[pipeline] ' + label + ' BGR=('
+          + m[0].toFixed(1) + ',' + m[1].toFixed(1) + ',' + m[2].toFixed(1) + ')');
+      } catch (_) {}
+    };
+
+    const runStep = async (label, pct, fn) => {
+      report(pct, label);
+      await yieldUI();
+      logBGR('ÖNCESİ [' + label + ']');
+      try {
+        const next = fn(mat);
+        mat.delete();
+        mat = next;
+        logBGR('SONRASI [' + label + ']');
+      } catch (e) {
+        console.error('[pipeline] adım hatası [' + label + ']:', e.stack || e);
+      }
+      await yieldUI();
+    };
 
     // Boya algılama
     let stainType = opts.stainType;
     if (stainType === 'auto') {
       try { stainType = detectStain(mat); }
-      catch (e) { console.warn('[pipeline] boya algılama hatası, he kabul edildi:', e); stainType = 'he'; }
-      await yieldUI();
-    }
-
-    // Piksel ortalaması logu (değişiklik doğrulama)
-    const logMean = (label) => {
-      try {
-        const m = cv.mean(mat);
-        console.log('[pipeline] ' + label + ' → ortalama BGR=('
-          + m[0].toFixed(1) + ',' + m[1].toFixed(1) + ',' + m[2].toFixed(1) + ')');
-      } catch (_) {}
-    };
-
-    // Her adım için güvenli sarmalayıcı
-    const runStep = async (label, pct, fn) => {
-      report(pct, label);
-      await yieldUI();
-      logMean('ÖNCE [' + label + ']');
-      try {
-        const next = fn(mat);
-        mat.delete();
-        mat = next;
-        logMean('SONRA [' + label + ']');
-      } catch (e) {
-        console.error('[pipeline] adım hatası [' + label + ']:', e.stack || e);
-        // Adımı atla, mevcut mat ile devam et
+      catch (e) {
+        console.warn('[pipeline] boya algılama hatası, he kabul edildi:', e);
+        stainType = 'he';
       }
       await yieldUI();
-    };
+    }
 
+    // 1. Flat-field
     if (opts.flatField) {
-      await runStep('Işık eğimi düzeltiliyor…', 20,
-        m => flatFieldCorrection(m, opts.flatFieldStrength ?? 50));
+      await runStep('Işık eğimi düzeltiliyor…', 12,
+        m => flatFieldCorrection(m, opts.flatFieldStrength ?? TUNE.flatStrengthDef));
     }
 
+    // 2. Beyaz dengesi
     if (opts.whiteBalance) {
-      await runStep('Beyaz dengesi ayarlanıyor…', 38, m => whiteBalance(m));
+      await runStep('Beyaz dengesi ayarlanıyor…', 25, m => whiteBalance(m));
     }
 
+    // — Beyaz dengesi sonrası arka plan maskesi ve referans kopyasını hazırla —
+    let bgMask  = null;
+    const wbRef = mat.clone();  // CLAHE/sharpen'dan korunacak arka plan için referans
+
+    // Konsol: işlem öncesi L ve S ortalamaları
+    let preLMean = 0, preSMean = 0;
+    try {
+      preLMean = meanLuminance(mat);
+      preSMean = meanSaturation(mat);
+      console.log('[pipeline] ÖNCESİ → L=' + preLMean.toFixed(1)
+        + '  S=' + preSMean.toFixed(1));
+    } catch (_) {}
+
+    try {
+      report(33, 'Arka plan maskesi hesaplanıyor…');
+      await yieldUI();
+      bgMask = computeBackgroundMask(mat);
+    } catch (e) {
+      console.warn('[pipeline] arka plan maskesi oluşturulamadı:', e);
+    }
+
+    // 3. Boya normalizasyonu — TUNE.normBlend ile karıştırılır
     if (opts.stainNorm) {
-      await runStep('Boya normalizasyonu…', 55,
+      await runStep('Boya normalizasyonu…', 45,
         m => reinhardNormalize(m, opts.hemaScale ?? 100, opts.eosinScale ?? 100));
     }
 
+    // 4. CLAHE — sadece L kanalında, hafifletilmiş (clipLimit 1.5)
     if (opts.clahe) {
-      await runStep('Kontrast artırılıyor (CLAHE)…', 72, m => applyCLAHE(m));
+      await runStep('Kontrast artırılıyor (CLAHE)…', 58, m => applyCLAHE(m));
     }
 
+    // 5. Keskinleştirme — hafif (amount 40)
     if (opts.sharpen) {
-      await runStep('Keskinleştirme…', 85,
-        m => unsharpMask(m, opts.sharpenAmount ?? 60));
+      await runStep('Keskinleştirme…', 70,
+        m => unsharpMask(m, opts.sharpenAmount ?? 40));
     }
 
+    // 6. Gölge tabanı — siyaha yapışmayı önle, kromatin detayı koru
+    await runStep('Gölge tabanı kaldırılıyor…', 78, m => liftShadows(m));
+
+    // 7. Arka plan koruması: CLAHE/sharpen'ın arka plandaki gürültüyü abartmasını önle.
+    //    Doku: işlenmiş hali kullan. Arka plan: wbRef'in yumuşatılmış halini geri yükle.
+    if (bgMask) {
+      report(85, 'Arka plan korunuyor…');
+      await yieldUI();
+      try {
+        const k          = TUNE.bgSmoothKernel | 1;
+        const bgSmoothed = new cv.Mat();
+        cv.GaussianBlur(wbRef, bgSmoothed, new cv.Size(k, k), 2);
+
+        const blended = blendWithMask(mat, bgSmoothed, bgMask);
+        bgSmoothed.delete();
+        mat.delete();
+        mat = blended;
+        console.log('[pipeline] arka plan koruması uygulandı');
+      } catch (e) {
+        console.warn('[pipeline] arka plan karıştırma hatası:', e);
+      }
+    }
+
+    // 8. Parlaklık telafisi — işlem görüntüyü belirgin kararttıysa telafi et
+    try {
+      const postLMean = meanLuminance(mat);
+      const postSMean = meanSaturation(mat);
+      console.log('[pipeline] SONRASI → L=' + postLMean.toFixed(1)
+        + '  S=' + postSMean.toFixed(1)
+        + '  (ΔL=' + (postLMean - preLMean).toFixed(1)
+        + '  ΔS=' + (postSMean - preSMean).toFixed(1) + ')');
+
+      const drop = preLMean - postLMean;
+      if (drop > 5) {
+        const comp      = Math.min(preLMean / postLMean, TUNE.brightnessCompMax);
+        const brightened = new cv.Mat();
+        mat.convertTo(brightened, -1, comp, 0);
+        mat.delete();
+        mat = brightened;
+        console.log('[pipeline] parlaklık telafisi: ×' + comp.toFixed(3)
+          + ' (L düşüşü ' + drop.toFixed(1) + ')');
+      }
+    } catch (e) {
+      console.warn('[pipeline] parlaklık telafisi hatası:', e);
+    }
+
+    // 9. Manuel ayarlar
     if (opts.applyManual) {
       await runStep('Manuel ayarlar…', 93, m => applyManual(m, opts));
     }
+
+    // Temizlik
+    wbRef.delete();
+    if (bgMask) bgMask.delete();
 
     report(98, 'Sonuç hazırlanıyor…');
     await yieldUI();
     const imgData = matToImageData(mat);
     mat.delete();
 
-    console.log('[pipeline] --- işleme tamamlandı ---');
+    console.log('[pipeline] ─── işleme tamamlandı ───');
     return { imgData, stainType };
   }
 
