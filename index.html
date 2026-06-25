@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PaToGörüntü — Patoloji Görüntü Düzeltme</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-logo">
+      <span class="logo-icon">🔬</span>
+      <h1>PaToGörüntü</h1>
+      <span class="logo-sub">Patoloji Görüntü Düzeltme</span>
+    </div>
+    <div class="header-status" id="statusBar">Hazır</div>
+  </header>
+
+  <div class="app-layout">
+
+    <!-- LEFT PANEL: Controls -->
+    <aside class="panel panel-left" id="controlPanel">
+
+      <!-- Image Input -->
+      <section class="ctrl-section">
+        <h2 class="section-title">Görüntü Girişi</h2>
+        <div class="drop-zone" id="dropZone">
+          <span class="drop-icon">📂</span>
+          <p>Görüntüleri buraya sürükleyin<br/>ya da tıklayın</p>
+          <p class="drop-hint">JPG · PNG · TIFF · Toplu yükleme desteklenir</p>
+          <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.tif,.tiff" multiple hidden />
+        </div>
+        <!-- Thumbnail bar for batch -->
+        <div class="thumb-bar" id="thumbBar"></div>
+      </section>
+
+      <!-- Stain Type -->
+      <section class="ctrl-section">
+        <h2 class="section-title">Boya Tipi</h2>
+        <div class="radio-group" id="stainGroup">
+          <label class="radio-btn active">
+            <input type="radio" name="stain" value="auto" checked /> Otomatik Algıla
+          </label>
+          <label class="radio-btn">
+            <input type="radio" name="stain" value="he" /> H&amp;E
+          </label>
+          <label class="radio-btn">
+            <input type="radio" name="stain" value="ihk" /> İHK (DAB)
+          </label>
+          <label class="radio-btn">
+            <input type="radio" name="stain" value="histo" /> Histokimya
+          </label>
+        </div>
+      </section>
+
+      <!-- Reference Image -->
+      <section class="ctrl-section">
+        <h2 class="section-title">Referans Görüntü</h2>
+        <div class="ref-buttons">
+          <button class="btn btn-outline" id="btnLoadRef">Referans Yükle</button>
+          <input type="file" id="refInput" accept=".jpg,.jpeg,.png,.tif,.tiff" hidden />
+          <div class="preset-row">
+            <span class="preset-label">Hazır:</span>
+            <button class="btn-preset active" data-preset="he_scanner">H&amp;E Tarayıcı</button>
+            <button class="btn-preset" data-preset="ihk_scanner">İHK Tarayıcı</button>
+          </div>
+        </div>
+        <div id="refThumb" class="ref-thumb-preview"></div>
+      </section>
+
+      <!-- Auto Pipeline -->
+      <section class="ctrl-section">
+        <h2 class="section-title">Otomatik Düzeltme</h2>
+        <div class="pipeline-toggles">
+          <label class="toggle-row">
+            <input type="checkbox" id="chkFlatField" checked />
+            <span>Işık eğimi / vinyetleme</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="chkWhiteBalance" checked />
+            <span>Beyaz dengesi</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="chkStainNorm" checked />
+            <span>Boya normalizasyonu</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="chkClahe" checked />
+            <span>Kontrast (CLAHE)</span>
+          </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="chkSharpen" checked />
+            <span>Keskinleştirme</span>
+          </label>
+        </div>
+        <button class="btn btn-primary btn-full" id="btnAutoProcess">
+          ▶ Otomatik Düzelt
+        </button>
+      </section>
+
+      <!-- Manual Sliders -->
+      <section class="ctrl-section" id="manualSection">
+        <h2 class="section-title">
+          Manuel Ayarlar
+          <button class="btn-collapse" id="btnCollapseManual">▾</button>
+        </h2>
+        <div id="manualSliders">
+          <div class="slider-group-label">Genel</div>
+          <div class="slider-row">
+            <label>Parlaklık</label>
+            <input type="range" id="sBrightness" min="-100" max="100" value="0" />
+            <span class="slider-val" id="vBrightness">0</span>
+          </div>
+          <div class="slider-row">
+            <label>Kontrast</label>
+            <input type="range" id="sContrast" min="-100" max="100" value="0" />
+            <span class="slider-val" id="vContrast">0</span>
+          </div>
+          <div class="slider-row">
+            <label>Doygunluk</label>
+            <input type="range" id="sSaturation" min="-100" max="100" value="0" />
+            <span class="slider-val" id="vSaturation">0</span>
+          </div>
+          <div class="slider-row">
+            <label>Renk Sıcaklığı</label>
+            <input type="range" id="sTemperature" min="-100" max="100" value="0" />
+            <span class="slider-val" id="vTemperature">0</span>
+          </div>
+          <div class="slider-group-label">Boya Yoğunlukları</div>
+          <div class="slider-row">
+            <label>Hematoksilen</label>
+            <input type="range" id="sHema" min="0" max="200" value="100" />
+            <span class="slider-val" id="vHema">100</span>
+          </div>
+          <div class="slider-row">
+            <label>Eozin</label>
+            <input type="range" id="sEosin" min="0" max="200" value="100" />
+            <span class="slider-val" id="vEosin">100</span>
+          </div>
+          <div class="slider-row">
+            <label>DAB (İHK)</label>
+            <input type="range" id="sDAB" min="0" max="200" value="100" />
+            <span class="slider-val" id="vDAB">100</span>
+          </div>
+          <div class="slider-group-label">Diğer</div>
+          <div class="slider-row">
+            <label>Keskinlik</label>
+            <input type="range" id="sSharpen" min="0" max="200" value="0" />
+            <span class="slider-val" id="vSharpen">0</span>
+          </div>
+          <div class="slider-row">
+            <label>Işık Eğimi</label>
+            <input type="range" id="sFlatField" min="0" max="100" value="50" />
+            <span class="slider-val" id="vFlatField">50</span>
+          </div>
+          <button class="btn btn-outline btn-full" id="btnApplyManual">Uygula</button>
+          <button class="btn btn-ghost btn-full" id="btnResetManual">Sıfırla</button>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- CENTER: Canvas Area -->
+    <main class="canvas-area" id="canvasArea">
+      <div class="canvas-empty" id="canvasEmpty">
+        <span>🔬</span>
+        <p>Başlamak için sol panelden görüntü yükleyin</p>
+      </div>
+
+      <!-- Before/After viewer — hidden until image loaded -->
+      <div class="viewer-wrap" id="viewerWrap" hidden>
+        <!-- View toggle -->
+        <div class="viewer-toolbar">
+          <div class="view-toggle-group">
+            <button class="view-btn active" data-view="split">Yan Yana</button>
+            <button class="view-btn" data-view="slider">Kaydırmalı</button>
+            <button class="view-btn" data-view="after">Sadece Sonra</button>
+          </div>
+          <div class="zoom-controls">
+            <button class="btn-icon" id="btnZoomOut">−</button>
+            <span id="zoomLabel">100%</span>
+            <button class="btn-icon" id="btnZoomIn">+</button>
+            <button class="btn-icon" id="btnZoomFit" title="Sığdır">⊞</button>
+          </div>
+        </div>
+
+        <!-- Split view (default) -->
+        <div class="split-view" id="splitView">
+          <div class="view-pane">
+            <div class="pane-label">ÖNCE</div>
+            <canvas id="canvasBefore"></canvas>
+          </div>
+          <div class="view-pane">
+            <div class="pane-label">SONRA</div>
+            <canvas id="canvasAfter"></canvas>
+          </div>
+        </div>
+
+        <!-- Slider view -->
+        <div class="slider-view" id="sliderView" hidden>
+          <div class="slider-container" id="sliderContainer">
+            <canvas id="canvasSliderBase"></canvas>
+            <div class="slider-overlay" id="sliderOverlay">
+              <canvas id="canvasSliderTop"></canvas>
+            </div>
+            <div class="slider-handle" id="sliderHandle">
+              <div class="handle-line"></div>
+              <div class="handle-btn">◀▶</div>
+            </div>
+            <div class="slider-label-left">ÖNCE</div>
+            <div class="slider-label-right">SONRA</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Processing overlay -->
+      <div class="processing-overlay" id="processingOverlay" hidden>
+        <div class="processing-card">
+          <div class="spinner"></div>
+          <p id="processingMsg">İşleniyor…</p>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="progressBar" style="width:0%"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- RIGHT PANEL: Export -->
+    <aside class="panel panel-right" id="exportPanel">
+
+      <section class="ctrl-section">
+        <h2 class="section-title">Dışa Aktarma</h2>
+
+        <div class="form-row">
+          <label>Format</label>
+          <select id="exportFormat">
+            <option value="jpeg">JPG</option>
+            <option value="png">PNG</option>
+            <option value="tiff">TIFF</option>
+          </select>
+        </div>
+
+        <div class="form-row" id="jpgQualityRow">
+          <label>JPG Kalitesi</label>
+          <input type="range" id="exportQuality" min="1" max="100" value="92" />
+          <span class="slider-val" id="vExportQuality">92</span>
+        </div>
+
+        <div class="form-row">
+          <label>DPI</label>
+          <select id="exportDPI">
+            <option value="72">72</option>
+            <option value="96">96</option>
+            <option value="150">150</option>
+            <option value="300" selected>300</option>
+            <option value="600">600</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Genişlik (px)</label>
+          <input type="number" id="exportWidth" placeholder="Orijinal" min="1" max="10000" />
+        </div>
+        <div class="form-row">
+          <label>Yükseklik (px)</label>
+          <input type="number" id="exportHeight" placeholder="Orijinal" min="1" max="10000" />
+        </div>
+        <div class="form-row">
+          <label class="toggle-row">
+            <input type="checkbox" id="chkLockAspect" checked />
+            <span>En/boy kilitle</span>
+          </label>
+        </div>
+
+        <button class="btn btn-primary btn-full" id="btnExportSingle">
+          ⬇ İndir (Bu Görüntü)
+        </button>
+        <button class="btn btn-outline btn-full" id="btnExportBatch">
+          ⬇ Toplu İndir (ZIP)
+        </button>
+      </section>
+
+      <!-- Batch status -->
+      <section class="ctrl-section" id="batchSection">
+        <h2 class="section-title">Toplu İşleme</h2>
+        <div id="batchList" class="batch-list"></div>
+        <button class="btn btn-secondary btn-full" id="btnBatchProcess">
+          ▶ Tümünü İşle
+        </button>
+      </section>
+
+      <!-- Info -->
+      <section class="ctrl-section">
+        <h2 class="section-title">Görüntü Bilgisi</h2>
+        <div class="info-grid" id="imageInfo">
+          <span class="info-label">Boyut</span><span id="infoSize">—</span>
+          <span class="info-label">Format</span><span id="infoFormat">—</span>
+          <span class="info-label">Algılanan Boya</span><span id="infoStain">—</span>
+          <span class="info-label">Durum</span><span id="infoStatus">—</span>
+        </div>
+      </section>
+
+      <section class="ctrl-section">
+        <h2 class="section-title">Hakkında</h2>
+        <p class="about-text">
+          Tüm işlem tarayıcınızda gerçekleşir.<br/>
+          Görüntüler hiçbir sunucuya gönderilmez.
+        </p>
+        <p class="about-text version">v0.1.0-iskelet</p>
+      </section>
+
+    </aside>
+
+  </div>
+
+  <!-- Hata kutusu (DOM hazır olsun, her zaman erişilebilir) -->
+  <div class="error-box" id="errorBox" hidden>
+    <span class="error-box-icon">⚠</span>
+    <span id="errorMsg">Hata</span>
+    <button class="error-box-close" id="btnErrorClose">✕</button>
+  </div>
+
+  <!-- OpenCV.js — Module.onRuntimeInitialized ile doğru init -->
+  <script>
+    var Module = {
+      onRuntimeInitialized: function () {
+        window.openCVReady = true;
+        window.dispatchEvent(new CustomEvent('opencv-ready'));
+        console.log('[PaToGörüntü] OpenCV.js WASM başlatıldı.');
+      }
+    };
+  </script>
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js"></script>
+
+  <!-- UTIF.js for TIFF support -->
+  <script src="https://cdn.jsdelivr.net/npm/utif2@4.1.0/UTIF.js"></script>
+
+  <!-- JSZip for batch download -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <!-- App scripts -->
+  <script src="js/pipeline.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
