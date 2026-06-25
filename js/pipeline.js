@@ -72,28 +72,46 @@ const Pipeline = (() => {
     return corr8;
   }
 
-  /* ── Adım 2: Beyaz dengesi (Gray World) ──────────────────── */
+  /* ── Adım 2: Beyaz dengesi (parlak piksel / lam camı arka planı) ── */
+  // Gray World H&E için yanlış: tüm kanal ortalamalarını eşitleyerek
+  // hematoksilen/eozin renklerini siler. Bunun yerine arka planı
+  // (en parlak %10 piksel = boş lam camı = gerçek beyaz) beyaza çek.
   function whiteBalance(src) {
-    console.log('[pipeline] 2- beyaz dengesi');
+    console.log('[pipeline] 2- beyaz dengesi (parlak piksel)');
+
+    // Gri görüntü üzerinden parlaklık maskesi
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_BGR2GRAY);
+    const mmRes = cv.minMaxLoc(gray);
+    // Eşik: maksimum parlaklığın %85'i — lam camı (boş alan) pikselleri
+    const thr = Math.max(180, mmRes.maxVal * 0.85);
+    const mask = new cv.Mat();
+    cv.threshold(gray, mask, thr, 255, cv.THRESH_BINARY);
+    gray.delete();
+
+    // Parlak bölgelerdeki kanal ortalamalarını ölç
     const inChs = new cv.MatVector();
     cv.split(src, inChs);
+    const brightMeans = [0, 1, 2].map(i => cv.mean(inChs.get(i), mask)[0] || 220);
+    mask.delete();
 
-    const means = [0, 1, 2].map(i => cv.mean(inChs.get(i))[0]);
-    const avg   = (means[0] + means[1] + means[2]) / 3 || 128;
-
+    // Her kanalı hedef beyaza (220) çek
+    const TARGET = 220;
     const outChs = new cv.MatVector();
-    cv.split(src, outChs);   // taze kopyalar
-
+    cv.split(src, outChs);
     for (let i = 0; i < 3; i++) {
-      const scale = means[i] > 1 ? avg / means[i] : 1;
-      outChs.get(i).convertTo(outChs.get(i), -1, scale, 0);
+      const sc = brightMeans[i] > 10 ? TARGET / brightMeans[i] : 1;
+      outChs.get(i).convertTo(outChs.get(i), -1, sc, 0);
+      inChs.get(i).delete();
     }
 
     const result = new cv.Mat();
     cv.merge(outChs, result);
-
-    for (let i = 0; i < 3; i++) { inChs.get(i).delete(); outChs.get(i).delete(); }
+    for (let i = 0; i < 3; i++) outChs.get(i).delete();
     inChs.delete(); outChs.delete();
+
+    console.log('[pipeline] 2- beyaz dengesi tamamlandı, arka plan ortalamaları:',
+      brightMeans.map(v => v.toFixed(1)));
     return result;
   }
 
@@ -235,6 +253,36 @@ const Pipeline = (() => {
   }
 
   /* ── Adım 5: CLAHE kontrast ──────────────────────────────── */
+  // CLAHE API OpenCV.js build'ine göre değişiyor:
+  //   4.5 öncesi: new cv.CLAHE(clipLimit, tileSize)
+  //   bazı build: cv.createCLAHE(clipLimit, tileSize)
+  //   hiçbiri yoksa: cv.normalize ile fallback
+  function _makeCLAHE(clipLimit, tileSize) {
+    if (typeof cv.CLAHE === 'function') {
+      try {
+        const c = new cv.CLAHE(clipLimit, tileSize);
+        if (typeof c.apply === 'function') { console.log('[pipeline] CLAHE: new cv.CLAHE'); return c; }
+        c.delete && c.delete();
+      } catch (_) {}
+      // Bazı build'lerde arg'sız constructor, sonra setter
+      try {
+        const c = new cv.CLAHE();
+        if (c.setClipLimit)     c.setClipLimit(clipLimit);
+        if (c.setTilesGridSize) c.setTilesGridSize(tileSize);
+        if (typeof c.apply === 'function') { console.log('[pipeline] CLAHE: new cv.CLAHE() + setters'); return c; }
+        c.delete && c.delete();
+      } catch (_) {}
+    }
+    if (typeof cv.createCLAHE === 'function') {
+      try {
+        const c = cv.createCLAHE(clipLimit, tileSize);
+        if (typeof c.apply === 'function') { console.log('[pipeline] CLAHE: cv.createCLAHE'); return c; }
+        c.delete && c.delete();
+      } catch (_) {}
+    }
+    return null;
+  }
+
   function applyCLAHE(src) {
     console.log('[pipeline] 5- kontrast (CLAHE)');
     const lab8 = new cv.Mat();
@@ -243,12 +291,21 @@ const Pipeline = (() => {
     cv.split(lab8, chs);
     lab8.delete();
 
-    const clahe = cv.createCLAHE(2.0, new cv.Size(8, 8));
-    const lOut  = new cv.Mat();
-    clahe.apply(chs.get(0), lOut);
-    lOut.copyTo(chs.get(0));
-    lOut.delete();
-    clahe.delete();
+    const clahe = _makeCLAHE(3.0, new cv.Size(8, 8));
+    if (clahe) {
+      const lOut = new cv.Mat();
+      clahe.apply(chs.get(0), lOut);
+      lOut.copyTo(chs.get(0));
+      lOut.delete();
+      clahe.delete();
+    } else {
+      // Fallback: L kanalını histogram gererek normalize et
+      console.warn('[pipeline] CLAHE API bulunamadı, normalize fallback kullanılıyor');
+      const lNorm = new cv.Mat();
+      cv.normalize(chs.get(0), lNorm, 0, 255, cv.NORM_MINMAX);
+      lNorm.copyTo(chs.get(0));
+      lNorm.delete();
+    }
 
     const merged = new cv.Mat();
     cv.merge(chs, merged);
@@ -335,14 +392,25 @@ const Pipeline = (() => {
       await yieldUI();
     }
 
+    // Piksel ortalaması logu (değişiklik doğrulama)
+    const logMean = (label) => {
+      try {
+        const m = cv.mean(mat);
+        console.log('[pipeline] ' + label + ' → ortalama BGR=('
+          + m[0].toFixed(1) + ',' + m[1].toFixed(1) + ',' + m[2].toFixed(1) + ')');
+      } catch (_) {}
+    };
+
     // Her adım için güvenli sarmalayıcı
     const runStep = async (label, pct, fn) => {
       report(pct, label);
       await yieldUI();
+      logMean('ÖNCE [' + label + ']');
       try {
         const next = fn(mat);
         mat.delete();
         mat = next;
+        logMean('SONRA [' + label + ']');
       } catch (e) {
         console.error('[pipeline] adım hatası [' + label + ']:', e.stack || e);
         // Adımı atla, mevcut mat ile devam et

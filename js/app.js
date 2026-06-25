@@ -255,9 +255,18 @@ function drawToCanvas(src, dst) {
 function updateSliderCanvases() {
   if (state.activeIdx < 0) return;
   const e = state.files[state.activeIdx];
-  drawToCanvas(e.origCanvas,                       dom.canvasSliderBase);
-  drawToCanvas(e.resultCanvas || e.origCanvas,     dom.canvasSliderTop);
-  updateSliderPosition();
+  drawToCanvas(e.origCanvas,                   dom.canvasSliderBase);
+  drawToCanvas(e.resultCanvas || e.origCanvas, dom.canvasSliderTop);
+  // Layout sonrası top canvas'ı base canvas display boyutuna eşitle
+  requestAnimationFrame(() => {
+    const dw = dom.canvasSliderBase.offsetWidth;
+    const dh = dom.canvasSliderBase.offsetHeight;
+    if (dw > 0) {
+      dom.canvasSliderTop.style.width  = dw + 'px';
+      dom.canvasSliderTop.style.height = dh + 'px';
+    }
+    updateSliderPosition();
+  });
 }
 
 function applyZoom() {
@@ -285,11 +294,11 @@ function setViewMode(mode) {
 }
 
 function updateSliderPosition() {
-  const x  = state.sliderX;
-  const w  = dom.canvasSliderBase.width * state.zoom;
-  const px = w * x;
-  dom.sliderHandle.style.left    = px + 'px';
-  dom.sliderOverlay.style.width  = px + 'px';
+  // offsetWidth = CSS display genişliği (piksel genişliği değil)
+  const displayW = dom.canvasSliderBase.offsetWidth || dom.canvasSliderBase.width;
+  const px = displayW * state.sliderX;
+  dom.sliderHandle.style.left   = px + 'px';
+  dom.sliderOverlay.style.width = px + 'px';
 }
 
 function initSliderDrag() {
@@ -306,9 +315,15 @@ function initSliderDrag() {
 
 /* ── Overlay ─────────────────────────────────────────────── */
 function showProcessing(show, msg = 'İşleniyor…') {
-  dom.processingOverlay.hidden = !show;
+  // style.display kullan — CSS [hidden] override sorununa karşı güvenli yol
+  dom.processingOverlay.style.display = show ? 'flex' : 'none';
   dom.processingMsg.textContent = msg;
-  if (!show) dom.progressBar.style.width = '0%';
+  if (!show) {
+    dom.progressBar.style.width = '0%';
+    console.log('[app] ✓ overlay kapatıldı');
+  } else {
+    console.log('[app] overlay açıldı:', msg);
+  }
 }
 
 function setProgress(pct, msg) {
@@ -415,8 +430,9 @@ async function processActive() {
       entry.batchItem.querySelector('.batch-dot').className = 'batch-dot error';
 
   } finally {
-    showProcessing(false);          // HER DURUMDA kapat
-    setProcessingButtons(true);     // HER DURUMDA aktifleştir
+    console.log('[app] processActive finally — overlay kapatılıyor');
+    showProcessing(false);       // HER DURUMDA kapat
+    setProcessingButtons(true);  // HER DURUMDA butonları aç
   }
 }
 

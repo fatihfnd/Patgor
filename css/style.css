@@ -23,6 +23,9 @@
   --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
 }
 
+/* [hidden] override: tarayıcı default'u CSS display kurallarıyla eziliyor */
+[hidden] { display: none !important; }
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
@@ -399,14 +402,17 @@ input[type=range]::-webkit-slider-thumb {
   gap: 2px;
   overflow: hidden;
   background: #0a0d16;
+  min-height: 0;
 }
 .view-pane {
   flex: 1;
   position: relative;
-  overflow: auto;
+  overflow: hidden;          /* taşma yok — canvas max-width/height ile sığar */
   display: flex;
   align-items: flex-start;
   justify-content: flex-start;
+  min-width: 0;
+  min-height: 0;
 }
 .pane-label {
   position: absolute;
@@ -422,7 +428,10 @@ input[type=range]::-webkit-slider-thumb {
 }
 .view-pane canvas {
   display: block;
-  transform-origin: top left;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
 }
 
 /* ── Slider view ─────────────────────────────────────────── */
@@ -433,13 +442,23 @@ input[type=range]::-webkit-slider-thumb {
   align-items: center;
   justify-content: center;
   background: #0a0d16;
+  min-height: 0;
 }
 .slider-container {
   position: relative;
   display: inline-block;
   user-select: none;
+  max-width: 100%;
+  max-height: 100%;
 }
-.slider-container canvas { display: block; }
+/* Base canvas: fit container */
+.slider-container > canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+}
 .slider-overlay {
   position: absolute;
   top: 0; left: 0;
@@ -447,7 +466,12 @@ input[type=range]::-webkit-slider-thumb {
   height: 100%;
   width: 50%;
 }
-.slider-overlay canvas { display: block; }
+/* Top canvas: JS sets width/height to match base canvas display size */
+.slider-overlay canvas {
+  display: block;
+  position: absolute;
+  top: 0; left: 0;
+}
 .slider-handle {
   position: absolute;
   top: 0;
