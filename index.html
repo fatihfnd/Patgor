@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Patgor — Patoloji Görüntü Düzeltme</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- OpenCV.js WASM (CDN) -->
+  <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady()" onerror="onOpenCvError()"></script>
+  <!-- UTIF.js for TIFF support -->
+  <script src="https://cdn.jsdelivr.net/npm/utif2@3.1.0/UTIF.js"></script>
+  <!-- JSZip for batch export -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <!-- FileSaver for download -->
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+
+  <header class="app-header">
+    <div class="header-left">
+      <span class="logo">🔬 Patgor</span>
+      <span class="tagline">Patoloji Mikroskop Görüntü Düzeltme</span>
+    </div>
+    <div class="header-right">
+      <div id="cv-status" class="cv-status loading">OpenCV yükleniyor…</div>
+    </div>
+  </header>
+
+  <div class="app-layout">
+
+    <!-- ═══════════════════════════════ LEFT PANEL ═══════════════════════════════ -->
+    <aside class="panel panel-left">
+
+      <!-- Input section -->
+      <section class="section">
+        <h2 class="section-title">Görüntü Girişi</h2>
+
+        <div id="drop-zone" class="drop-zone" role="button" tabindex="0"
+             aria-label="Görüntü yükle">
+          <div class="drop-icon">⬆</div>
+          <div class="drop-text">Sürükle &amp; bırak veya tıkla</div>
+          <div class="drop-sub">JPG · PNG · TIFF · Çoklu dosya</div>
+          <input id="file-input" type="file" multiple
+                 accept=".jpg,.jpeg,.png,.tif,.tiff" hidden />
+        </div>
+
+        <!-- Batch queue -->
+        <div id="batch-panel" class="batch-panel hidden">
+          <div class="batch-header">
+            <span id="batch-count">0 görüntü</span>
+            <button id="btn-clear-batch" class="btn-link">Temizle</button>
+          </div>
+          <ul id="batch-list" class="batch-list"></ul>
+        </div>
+      </section>
+
+      <!-- Reference image section -->
+      <section class="section">
+        <h2 class="section-title">Referans Görüntü</h2>
+        <select id="ref-preset" class="select-full">
+          <option value="builtin-he">Yerleşik H&amp;E (standart)</option>
+          <option value="builtin-ihk">Yerleşik İHK (DAB)</option>
+          <option value="builtin-histo">Yerleşik Histokimya</option>
+          <option value="custom">Özel referans yükle…</option>
+        </select>
+        <div id="custom-ref-row" class="custom-ref-row hidden">
+          <input id="ref-file-input" type="file" accept=".jpg,.jpeg,.png,.tif,.tiff" hidden />
+          <button id="btn-pick-ref" class="btn-secondary btn-sm">Referans Seç</button>
+          <span id="ref-name" class="ref-name">—</span>
+        </div>
+      </section>
+
+      <!-- Stain type -->
+      <section class="section">
+        <h2 class="section-title">Boya Tipi</h2>
+        <div class="radio-group">
+          <label><input type="radio" name="stain" value="auto" checked /> Otomatik algıla</label>
+          <label><input type="radio" name="stain" value="he" /> H&amp;E</label>
+          <label><input type="radio" name="stain" value="ihk" /> İHK (DAB)</label>
+          <label><input type="radio" name="stain" value="histo" /> Histokimya</label>
+        </div>
+        <div id="stain-detected" class="stain-badge hidden">Algılanan: <strong id="stain-detected-val">—</strong></div>
+      </section>
+
+      <!-- Export section -->
+      <section class="section">
+        <h2 class="section-title">Dışa Aktarma</h2>
+
+        <div class="form-row">
+          <label>Format</label>
+          <select id="export-format">
+            <option value="jpeg">JPG</option>
+            <option value="png">PNG</option>
+            <option value="tiff">TIFF</option>
+          </select>
+        </div>
+
+        <div id="jpg-quality-row" class="form-row">
+          <label>JPG Kalite</label>
+          <input id="jpg-quality" type="range" min="60" max="100" value="92" step="1" />
+          <span id="jpg-quality-val" class="val-display">92</span>
+        </div>
+
+        <div class="form-row">
+          <label>DPI</label>
+          <select id="export-dpi">
+            <option value="72">72</option>
+            <option value="96">96</option>
+            <option value="150">150</option>
+            <option value="300" selected>300</option>
+            <option value="600">600</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label>Çıktı Boyutu</label>
+          <select id="export-size">
+            <option value="original" selected>Orijinal</option>
+            <option value="2048">2048 px (uzun kenar)</option>
+            <option value="4096">4096 px (uzun kenar)</option>
+            <option value="custom">Özel…</option>
+          </select>
+        </div>
+
+        <div id="custom-size-row" class="form-row hidden">
+          <label>Genişlik px</label>
+          <input id="export-custom-w" type="number" value="2048" min="64" max="16384" />
+        </div>
+
+        <div class="btn-group-v">
+          <button id="btn-export-single" class="btn-primary" disabled>
+            İndir (tek)
+          </button>
+          <button id="btn-export-batch" class="btn-secondary hidden" disabled>
+            Hepsini İndir (ZIP)
+          </button>
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- ═══════════════════════════════ MAIN CANVAS ═══════════════════════════════ -->
+    <main class="canvas-area">
+
+      <!-- Empty state -->
+      <div id="empty-state" class="empty-state">
+        <div class="empty-icon">🔬</div>
+        <div class="empty-title">Görüntü bekleniyor</div>
+        <div class="empty-sub">Sol panelden bir mikroskop görüntüsü yükleyin</div>
+      </div>
+
+      <!-- Viewer (hidden until image loaded) -->
+      <div id="viewer" class="viewer hidden">
+
+        <div class="viewer-toolbar">
+          <div class="viewer-toolbar-left">
+            <span id="img-name" class="img-name">—</span>
+            <span id="img-size" class="img-size-label">—</span>
+          </div>
+          <div class="viewer-toolbar-center">
+            <div class="compare-toggle" role="group">
+              <button id="btn-side-by-side" class="toggle-btn active" title="Yan yana">⬜⬜</button>
+              <button id="btn-slider" class="toggle-btn" title="Kaydırma">◧</button>
+            </div>
+          </div>
+          <div class="viewer-toolbar-right">
+            <button id="btn-auto-correct" class="btn-primary" disabled>
+              ⚡ Otomatik Düzelt
+            </button>
+            <button id="btn-reset" class="btn-secondary" disabled>↩ Sıfırla</button>
+          </div>
+        </div>
+
+        <!-- Side-by-side view -->
+        <div id="view-side-by-side" class="view-sbs">
+          <div class="canvas-wrap">
+            <div class="canvas-label">Önce</div>
+            <canvas id="canvas-before"></canvas>
+          </div>
+          <div class="canvas-wrap">
+            <div class="canvas-label">Sonra</div>
+            <canvas id="canvas-after"></canvas>
+          </div>
+        </div>
+
+        <!-- Slider view -->
+        <div id="view-slider" class="view-slider hidden">
+          <div class="slider-container">
+            <canvas id="canvas-slider-before" class="slider-canvas"></canvas>
+            <canvas id="canvas-slider-after" class="slider-canvas slider-canvas-after"></canvas>
+            <div id="slider-divider" class="slider-divider">
+              <div class="slider-handle"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Processing overlay -->
+        <div id="processing-overlay" class="processing-overlay hidden">
+          <div class="spinner"></div>
+          <div id="processing-msg" class="processing-msg">İşleniyor…</div>
+          <div id="processing-step" class="processing-step"></div>
+        </div>
+
+      </div>
+    </main>
+
+    <!-- ═══════════════════════════════ RIGHT PANEL ═══════════════════════════════ -->
+    <aside class="panel panel-right">
+
+      <section class="section">
+        <h2 class="section-title">Manuel Ayarlar</h2>
+
+        <div class="slider-section-title">Renk &amp; Işık</div>
+
+        <div class="slider-row">
+          <label>Sıcaklık</label>
+          <input type="range" id="sl-temp" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-temp-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>Parlaklık</label>
+          <input type="range" id="sl-brightness" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-brightness-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>Kontrast</label>
+          <input type="range" id="sl-contrast" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-contrast-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>Doygunluk</label>
+          <input type="range" id="sl-saturation" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-saturation-val">0</span>
+        </div>
+
+        <div class="slider-section-title">Boya Yoğunlukları</div>
+
+        <div class="slider-row">
+          <label>Hematoksilen</label>
+          <input type="range" id="sl-hema" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-hema-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>Eozin</label>
+          <input type="range" id="sl-eosin" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-eosin-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>DAB (İHK)</label>
+          <input type="range" id="sl-dab" min="-100" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-dab-val">0</span>
+        </div>
+
+        <div class="slider-section-title">Keskinlik &amp; Düzeltme</div>
+
+        <div class="slider-row">
+          <label>Keskinlik</label>
+          <input type="range" id="sl-sharpness" min="0" max="100" value="0" step="1" />
+          <span class="val-display" id="sl-sharpness-val">0</span>
+        </div>
+        <div class="slider-row">
+          <label>Flat-Field</label>
+          <input type="range" id="sl-flatfield" min="0" max="100" value="80" step="1" />
+          <span class="val-display" id="sl-flatfield-val">80</span>
+        </div>
+
+        <div class="btn-group-v" style="margin-top: 1rem;">
+          <button id="btn-apply-manual" class="btn-primary" disabled>Uygula</button>
+          <button id="btn-reset-sliders" class="btn-link">Sıfırla</button>
+        </div>
+      </section>
+
+      <!-- Pipeline status -->
+      <section class="section" id="pipeline-status-section" style="display:none;">
+        <h2 class="section-title">İşlem Adımları</h2>
+        <ul id="pipeline-steps" class="pipeline-steps"></ul>
+      </section>
+
+    </aside>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/utils.js"></script>
+  <script src="js/pipeline.js"></script>
+  <script src="js/stain.js"></script>
+  <script src="js/export.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
