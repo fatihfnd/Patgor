@@ -408,10 +408,22 @@
         <section class="ctrl-section">
           <h2 class="section-title">Dışa Aktarma</h2>
           <div class="form-row">
-            <label>Panel (px)</label>
-            <input type="number" id="cgExportW" min="64" max="8000" value="1000" style="width:65px">
-            <span style="color:var(--text-dim);margin:0 3px">×</span>
-            <input type="number" id="cgExportH" min="64" max="8000" value="1000" style="width:65px">
+            <label>Oran</label>
+            <select id="cgAspect">
+              <option value="1:1" selected>1:1 Kare</option>
+              <option value="4:3">4:3</option>
+              <option value="3:2">3:2</option>
+              <option value="16:9">16:9</option>
+              <option value="free">Serbest</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Genişlik (px)</label>
+            <input type="number" id="cgExportW" min="64" max="8000" value="1000" style="width:75px">
+          </div>
+          <div class="form-row" id="cgExportHRow" style="display:none">
+            <label>Yükseklik (px)</label>
+            <input type="number" id="cgExportH" min="64" max="8000" value="1000" style="width:75px">
           </div>
           <div class="form-row">
             <label>Format</label>

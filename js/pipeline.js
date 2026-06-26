@@ -604,42 +604,83 @@ const Pipeline = (() => {
 
     const cx = Math.round(rect.x + rect.width  / 2);
     const cy = Math.round(rect.y + rect.height / 2);
-    const r  = Math.round(Math.min(rect.width, rect.height) / 2);
+    // %6 içeri al: karanlık kenar bandı ve halka maskenin dışında kalır
+    const r  = Math.round(Math.min(rect.width, rect.height) / 2 * 0.94);
 
     console.log('[pipeline] daire bulundu: merkez=(' + cx + ',' + cy
-      + ')  r=' + r + '  alan=' + (areaFrac * 100).toFixed(1) + '%');
+      + ')  r=' + r + '  (küçültülmüş)  alan=' + (areaFrac * 100).toFixed(1) + '%');
 
-    // Daire içinin ortalama parlaklığı → güvenli dolgu değeri (zemin camını taklit eder)
-    const circleMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
-    cv.circle(circleMask, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
-    const inMean = cv.mean(src, circleMask);
-    circleMask.delete();
-    const meanVal = (inMean[0] + inMean[1] + inMean[2]) / 3;
-    // meanVal + 30: doku ortalamasından biraz daha parlak, saf cam gibi görünür
-    const fillVal = Math.round(Math.max(200, Math.min(235, meanVal + 30)));
+    // Yumuşatılmış (feathered) maske: sert keskin kenar kalmaz
+    // Adım 1 — tam dolu maske
+    const hardMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
+    cv.circle(hardMask, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
 
-    // Daire dışını fillVal ile doldur
-    const result = src.clone();
-    const bgMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(255));
-    cv.circle(bgMask, new cv.Point(cx, cy), r, new cv.Scalar(0), -1);
-    const fill = new cv.Mat(src.rows, src.cols, src.type(),
-      new cv.Scalar(fillVal, fillVal, fillVal, 255));
-    fill.copyTo(result, bgMask);
-    fill.delete(); bgMask.delete();
+    // Adım 2 — hafif blur ile yumuşat (kenar ~featherPx piksellik geçiş)
+    const featherPx = Math.max(3, Math.round(r * 0.012));
+    const blurKs    = (featherPx * 2 + 1) | 1;   // tek sayı olmalı
+    const softMask  = new cv.Mat();
+    cv.GaussianBlur(hardMask, softMask,
+      new cv.Size(blurKs, blurKs), featherPx * 0.5);
+    hardMask.delete();
 
-    console.log('[pipeline] daire dışı fillVal=' + fillVal + ' ile dolduruldu');
+    // Adım 3 — dışarıyı düz beyaza (245) doldur, içi ile blend et
+    const fillVal = 245;
+    const result  = src.clone();
+    // cv.copyTo maskesi: softMask=0 olan yerler fill, diğerleri src kalır.
+    // Bunu piksel bazında uygulayacağız: result = fill * (1 - alpha) + src * alpha
+    // α = softMask / 255
+    const fill32 = new cv.Mat(src.rows, src.cols, cv.CV_32FC3,
+      new cv.Scalar(fillVal, fillVal, fillVal));
+    const src32  = new cv.Mat();
+    src.convertTo(src32, cv.CV_32FC3, 1, 0);
+
+    // alpha kanalı olarak softMask kullan
+    const alpha32 = new cv.Mat();
+    softMask.convertTo(alpha32, cv.CV_32F, 1 / 255);
+    softMask.delete();
+
+    const a3 = new cv.Mat();
+    const planes = new cv.MatVector();
+    planes.push_back(alpha32); planes.push_back(alpha32); planes.push_back(alpha32);
+    cv.merge(planes, a3);
+    planes.delete(); alpha32.delete();
+
+    // blended = src * alpha + fill * (1-alpha)
+    const one  = new cv.Mat(src.rows, src.cols, cv.CV_32FC3, new cv.Scalar(1, 1, 1));
+    const oma  = new cv.Mat();   // 1 - alpha
+    cv.subtract(one, a3, oma);
+    one.delete();
+
+    const srcPart  = new cv.Mat();
+    const fillPart = new cv.Mat();
+    cv.multiply(src32,  a3,  srcPart);
+    cv.multiply(fill32, oma, fillPart);
+    const blended32 = new cv.Mat();
+    cv.add(srcPart, fillPart, blended32);
+    src32.delete(); fill32.delete(); a3.delete(); oma.delete();
+    srcPart.delete(); fillPart.delete();
+
+    blended32.convertTo(result, cv.CV_8UC3, 1, 0);
+    blended32.delete();
+
+    console.log('[pipeline] daire dışı beyaza (245) feathered blend uygulandı '
+      + '(feather=' + featherPx + 'px)');
     return { valid: true, result, cx, cy, r };
   }
 
+  // Tam kare (1:1) kırpma — dairenin sığdığı en küçük kare
   function cropToCircleBounds(src, cx, cy, r) {
     const margin = Math.max(4, Math.round(r * 0.015));
-    const x = Math.max(0, cx - r - margin);
-    const y = Math.max(0, cy - r - margin);
-    const w = Math.min(src.cols - x, (r + margin) * 2);
-    const h = Math.min(src.rows - y, (r + margin) * 2);
-    const result = src.roi(new cv.Rect(x, y, w, h)).clone();
-    console.log('[pipeline] daire kırpıldı: '
-      + src.cols + 'x' + src.rows + ' → ' + w + 'x' + h);
+    const half   = r + margin;                          // kare kenar/2
+    const x = Math.max(0, cx - half);
+    const y = Math.max(0, cy - half);
+    const side = Math.min(
+      Math.min(src.cols - x, src.rows - y),
+      half * 2
+    );
+    const result = src.roi(new cv.Rect(x, y, side, side)).clone();
+    console.log('[pipeline] daire kırpıldı (kare): '
+      + src.cols + 'x' + src.rows + ' → ' + side + 'x' + side);
     return result;
   }
 
