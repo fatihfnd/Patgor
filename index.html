@@ -99,6 +99,10 @@
             <input type="checkbox" id="chkSharpen" checked />
             <span>Keskinleştirme</span>
           </label>
+          <label class="toggle-row">
+            <input type="checkbox" id="chkCropBorder" />
+            <span>Siyah kenarı kırp <small style="color:var(--text-dim)">(telefon)</small></span>
+          </label>
         </div>
         <button class="btn btn-primary btn-full" id="btnAutoProcess">
           ▶ Otomatik Düzelt
@@ -305,6 +309,62 @@
           <span class="info-label">Algılanan Boya</span><span id="infoStain">—</span>
           <span class="info-label">Durum</span><span id="infoStatus">—</span>
         </div>
+      </section>
+
+      <!-- Figür / Kolaj Oluşturucu -->
+      <section class="ctrl-section">
+        <h2 class="section-title">Figür Oluşturucu</h2>
+        <div class="form-row">
+          <label>Sütun</label>
+          <input type="number" id="figCols" min="1" max="6" value="2" style="width:60px" />
+          <label style="margin-left:8px">Satır</label>
+          <input type="number" id="figRows" min="1" max="6" value="2" style="width:60px" />
+        </div>
+        <div class="form-row">
+          <label>Boşluk (px)</label>
+          <input type="number" id="figGap" min="0" max="200" value="8" style="width:60px" />
+        </div>
+        <div class="form-row">
+          <label>Panel boyutu</label>
+          <input type="number" id="figPanelSize" min="64" max="4000" value="1000" style="width:70px" />
+          <span style="color:var(--text-dim);font-size:11px;margin-left:2px">px</span>
+        </div>
+        <div class="form-row">
+          <label>Arka plan</label>
+          <select id="figBg">
+            <option value="#ffffff">Beyaz</option>
+            <option value="#000000">Siyah</option>
+            <option value="transparent">Şeffaf</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Etiket</label>
+          <select id="figLabelStyle">
+            <option value="none">Yok</option>
+            <option value="upper">A, B, C…</option>
+            <option value="lower">a, b, c…</option>
+            <option value="num">1, 2, 3…</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Etiket boyutu</label>
+          <input type="number" id="figLabelSize" min="12" max="300" value="48" style="width:60px" />
+        </div>
+        <div class="form-row">
+          <label>Etiket rengi</label>
+          <select id="figLabelColor">
+            <option value="#ffffff">Beyaz</option>
+            <option value="#000000">Siyah</option>
+            <option value="#ffff00">Sarı</option>
+          </select>
+        </div>
+        <p style="font-size:10px;color:var(--text-dim);margin:4px 0">
+          İlk <span id="figPanelCountHint">4</span> görüntü kullanılır (yükleme sırası).
+          Format ve DPI yukarıdaki ayarlardan alınır.
+        </p>
+        <button class="btn btn-secondary btn-full" id="btnCreateFigure">
+          🖼 Figür Oluştur ve İndir
+        </button>
       </section>
 
       <section class="ctrl-section">

@@ -12,7 +12,7 @@ const Pipeline = (() => {
      ══════════════════════════════════════════════════════════ */
   const TUNE = {
     // Flat-field
-    flatKernelFrac:    0.25,   // kernel = kısa kenar × oran — büyük → halo yok
+    flatKernelFrac:    0.40,   // kernel = kısa kenar × oran — 0.40 → radyal haloyu kaldırır
     flatStrengthDef:   28,     // varsayılan güç (0-100); UI slider değeri geçer
 
     // Beyaz dengesi — parlak arka plan hedefi (255'e yakma)
@@ -83,12 +83,45 @@ const Pipeline = (() => {
     return mS;
   }
 
+  /* ── Merkez/kenar parlaklık oranı — gradyan ölçümü ──────── */
+  function centerEdgeBrightness(bgr) {
+    try {
+      const gray = new cv.Mat();
+      cv.cvtColor(bgr, gray, cv.COLOR_BGR2GRAY);
+      const r = gray.rows, c = gray.cols;
+      const mg = Math.max(4, Math.floor(Math.min(r, c) * 0.08));
+      const cw = Math.max(4, Math.floor(c * 0.15));
+      const ch = Math.max(4, Math.floor(r * 0.15));
+
+      const centerRoi = gray.roi(new cv.Rect(Math.floor(c/2) - cw, Math.floor(r/2) - ch, cw*2, ch*2));
+      const cM = cv.mean(centerRoi)[0];
+      centerRoi.delete();
+
+      const strips = [
+        gray.roi(new cv.Rect(0, 0, c, mg)),
+        gray.roi(new cv.Rect(0, r - mg, c, mg)),
+        gray.roi(new cv.Rect(0, 0, mg, r)),
+        gray.roi(new cv.Rect(c - mg, 0, mg, r)),
+      ];
+      const eM = strips.reduce((s, m) => s + cv.mean(m)[0], 0) / strips.length;
+      strips.forEach(m => m.delete());
+      gray.delete();
+      return { center: cM, edge: eM, ratio: eM > 0 ? cM / eM : 1 };
+    } catch (_) { return { center: 0, edge: 0, ratio: 1 }; }
+  }
+
   /* ── Adım 1: Flat-field / vinyetleme ────────────────────── */
   // Büyük kernel (kısa kenar × 0.25) → global ışık gradyanını tahmin eder,
   // lokal detayları korur → halo oluşmaz
   function flatFieldCorrection(src, strength) {
-    console.log('[pipeline] 1- flat-field strength=' + strength);
+    console.log('[pipeline] 1- flat-field strength=' + strength
+      + '  kernel=' + Math.round(Math.min(src.cols, src.rows) * TUNE.flatKernelFrac));
     if (strength === 0) return src.clone();
+
+    const pre = centerEdgeBrightness(src);
+    console.log('[pipeline] FF önce: merkez=' + pre.center.toFixed(1)
+      + '  kenar=' + pre.edge.toFixed(1) + '  oran=' + pre.ratio.toFixed(3)
+      + (pre.ratio > 1.05 ? '  (merkez parlak — halo var)' : ''));
 
     let k = Math.round(Math.min(src.cols, src.rows) * TUNE.flatKernelFrac);
     if (k < 3) k = 3;
@@ -100,7 +133,6 @@ const Pipeline = (() => {
     const blurF = new cv.Mat();
     cv.GaussianBlur(srcF, blurF, new cv.Size(k, k), 0);
 
-    // Orijinal ortalama parlaklık → bölme sonrası yeniden ölçekle
     const origMean = cv.mean(srcF);
     const mb = (origMean[0] + origMean[1] + origMean[2]) / 3 || 128;
 
@@ -112,12 +144,21 @@ const Pipeline = (() => {
     corrF.convertTo(corr8, cv.CV_8U);
     corrF.delete();
 
-    if (strength >= 100) return corr8;
+    let result;
+    if (strength >= 100) {
+      result = corr8;
+    } else {
+      const alpha = strength / 100;
+      result = new cv.Mat();
+      cv.addWeighted(corr8, alpha, src, 1 - alpha, 0, result);
+      corr8.delete();
+    }
 
-    const alpha  = strength / 100;
-    const result = new cv.Mat();
-    cv.addWeighted(corr8, alpha, src, 1 - alpha, 0, result);
-    corr8.delete();
+    const post = centerEdgeBrightness(result);
+    console.log('[pipeline] FF sonra: merkez=' + post.center.toFixed(1)
+      + '  kenar=' + post.edge.toFixed(1) + '  oran=' + post.ratio.toFixed(3)
+      + (Math.abs(post.ratio - 1) < 0.05 ? '  ✓ düz' : ''));
+
     return result;
   }
 
@@ -379,9 +420,12 @@ const Pipeline = (() => {
     cv.cvtColor(merged8, normResult, cv.COLOR_Lab2BGR);
     merged8.delete();
 
-    // normBlend × normalize + (1-normBlend) × orijinal
+    // Özel ref varsa tam eşleştir (blend=1.0); preset'te blend<1 → yumuşak geçiş
+    const blend = customRefStats ? 1.0 : TUNE.normBlend;
+    console.log('[pipeline] norm blend=' + blend.toFixed(2)
+      + (customRefStats ? ' (özel ref)' : ' (preset)'));
     const blended = new cv.Mat();
-    cv.addWeighted(normResult, TUNE.normBlend, src, 1 - TUNE.normBlend, 0, blended);
+    cv.addWeighted(normResult, blend, src, 1 - blend, 0, blended);
     normResult.delete();
     return blended;
   }
@@ -509,6 +553,63 @@ const Pipeline = (() => {
     return result;
   }
 
+  /* ── Siyah kenar kırpma (telefon/oküler çekimi) ─────────── */
+  // Düşük eşiğin altındaki dış siyah halkayı morphological closing ile doldur,
+  // en büyük parlak bölgenin bounding rect'ini bul ve kırp.
+  function cropBlackBorder(src, threshold) {
+    threshold = (threshold !== undefined) ? threshold : 22;
+    console.log('[pipeline] siyah kenar kırpma threshold=' + threshold);
+
+    const gray = new cv.Mat();
+    cv.cvtColor(src, gray, cv.COLOR_BGR2GRAY);
+    const binary = new cv.Mat();
+    cv.threshold(gray, binary, threshold, 255, cv.THRESH_BINARY);
+    gray.delete();
+
+    // Küçük delikleri kapat (boyuta orantılı kernel)
+    const ks = (Math.round(Math.min(src.cols, src.rows) * 0.03) | 1) || 21;
+    const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ks, ks));
+    const closed = new cv.Mat();
+    cv.morphologyEx(binary, closed, cv.MORPH_CLOSE, kernel);
+    kernel.delete(); binary.delete();
+
+    const contours  = new cv.MatVector();
+    const hierarchy = new cv.Mat();
+    cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    closed.delete(); hierarchy.delete();
+
+    if (contours.size() === 0) {
+      contours.delete();
+      console.log('[pipeline] siyah kenar: içerik kontur bulunamadı');
+      return src.clone();
+    }
+
+    let maxArea = 0, maxIdx = 0;
+    for (let i = 0; i < contours.size(); i++) {
+      const a = cv.contourArea(contours.get(i));
+      if (a > maxArea) { maxArea = a; maxIdx = i; }
+    }
+    const rect = cv.boundingRect(contours.get(maxIdx));
+    for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
+    contours.delete();
+
+    if (rect.width < src.cols * 0.30 || rect.height < src.rows * 0.30) {
+      console.log('[pipeline] siyah kenar: içerik çok küçük, kırpılmadı');
+      return src.clone();
+    }
+
+    const margin = Math.round(Math.min(rect.width, rect.height) * 0.01);
+    const x = Math.max(0, rect.x - margin);
+    const y = Math.max(0, rect.y - margin);
+    const w = Math.min(src.cols - x, rect.width  + 2 * margin);
+    const h = Math.min(src.rows - y, rect.height + 2 * margin);
+
+    const result = src.roi(new cv.Rect(x, y, w, h)).clone();
+    console.log('[pipeline] siyah kenar kırpıldı: '
+      + src.cols + 'x' + src.rows + ' → ' + w + 'x' + h);
+    return result;
+  }
+
   /* ── Manuel ayarlar ──────────────────────────────────────── */
   function applyManual(src, opts) {
     console.log('[pipeline] manuel ayarlar');
@@ -583,6 +684,11 @@ const Pipeline = (() => {
       }
       await yieldUI();
     };
+
+    // 0. Siyah kenar kırpma (telefon/oküler çekimi)
+    if (opts.cropBorder) {
+      await runStep('Siyah kenar kırpılıyor…', 6, m => cropBlackBorder(m));
+    }
 
     // Boya algılama
     let stainType = opts.stainType;
