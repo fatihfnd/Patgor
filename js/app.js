@@ -1,66 +1,66 @@
 /**
  * app.js — Ana uygulama mantığı
- * Gereksinimler:
- *  - OpenCV hazır olana kadar işleme butonları disabled
- *  - Tüm işleme try/catch/finally — finally'de overlay HER ZAMAN kapanır
- *  - 60 sn zaman aşımı
- *  - Hata olursa ekranda kırmızı hata kutusu
- *  - Büyük görüntüler (>1500px) işleme öncesi küçültülür, sonra orijinal boyuta döner
- *  - Referans görüntü opsiyonel; varsayılan presetler her zaman aktif
  */
 
 /* ── Sabitler ────────────────────────────────────────────── */
 const PROCESS_TIMEOUT_MS = 60_000;
-const MAX_PROCESS_PX     = 1500; // işleme için max kenar (piksel)
+const MAX_PROCESS_PX     = 1500;
+const LIVE_PREVIEW_PX    = 320;   // canlı önizleme için küçük çalışma kopyası
 
 /* ── Durum ───────────────────────────────────────────────── */
 const state = {
-  files:        [],
-  activeIdx:    -1,
-  viewMode:     'split',
-  zoom:         1.0,
-  openCVReady:  false,
-  sliderX:      0.5,
+  files:       [],
+  activeIdx:   -1,
+  viewMode:    'split',
+  zoom:        1.0,
+  openCVReady: false,
+  sliderX:     0.5,
 };
+
+/* ── Canlı önizleme durum ────────────────────────────────── */
+let _liveTimer   = null;
+let _livePending = false;
+let _liveNeeded  = false;
 
 /* ── DOM ─────────────────────────────────────────────────── */
 const $ = id => document.getElementById(id);
-
-// Tüm referansları sayfa yüklendikten sonra doldur
 let dom = {};
+
 function initDom() {
   dom = {
-    dropZone:           $('dropZone'),
-    fileInput:          $('fileInput'),
-    refInput:           $('refInput'),
-    thumbBar:           $('thumbBar'),
-    canvasEmpty:        $('canvasEmpty'),
-    viewerWrap:         $('viewerWrap'),
-    splitView:          $('splitView'),
-    sliderView:         $('sliderView'),
-    canvasBefore:       $('canvasBefore'),
-    canvasAfter:        $('canvasAfter'),
-    canvasSliderBase:   $('canvasSliderBase'),
-    canvasSliderTop:    $('canvasSliderTop'),
-    sliderHandle:       $('sliderHandle'),
-    sliderOverlay:      $('sliderOverlay'),
-    processingOverlay:  $('processingOverlay'),
-    processingMsg:      $('processingMsg'),
-    progressBar:        $('progressBar'),
-    statusBar:          $('statusBar'),
-    batchList:          $('batchList'),
-    infoSize:           $('infoSize'),
-    infoFormat:         $('infoFormat'),
-    infoStain:          $('infoStain'),
-    infoStatus:         $('infoStatus'),
-    zoomLabel:          $('zoomLabel'),
-    jpgQualityRow:      $('jpgQualityRow'),
-    refThumb:           $('refThumb'),
-    errorBox:           $('errorBox'),
-    errorMsg:           $('errorMsg'),
-    btnAutoProcess:     $('btnAutoProcess'),
-    btnApplyManual:     $('btnApplyManual'),
-    btnBatchProcess:    $('btnBatchProcess'),
+    dropZone:          $('dropZone'),
+    fileInput:         $('fileInput'),
+    refInput:          $('refInput'),
+    thumbBar:          $('thumbBar'),
+    canvasEmpty:       $('canvasEmpty'),
+    viewerWrap:        $('viewerWrap'),
+    splitView:         $('splitView'),
+    sliderView:        $('sliderView'),
+    canvasBefore:      $('canvasBefore'),
+    canvasAfter:       $('canvasAfter'),
+    canvasSliderBase:  $('canvasSliderBase'),
+    canvasSliderTop:   $('canvasSliderTop'),
+    sliderHandle:      $('sliderHandle'),
+    sliderOverlay:     $('sliderOverlay'),
+    processingOverlay: $('processingOverlay'),
+    processingMsg:     $('processingMsg'),
+    progressBar:       $('progressBar'),
+    statusBar:         $('statusBar'),
+    batchList:         $('batchList'),
+    infoSize:          $('infoSize'),
+    infoFormat:        $('infoFormat'),
+    infoStain:         $('infoStain'),
+    infoStatus:        $('infoStatus'),
+    zoomLabel:         $('zoomLabel'),
+    jpgQualityRow:     $('jpgQualityRow'),
+    refThumb:          $('refThumb'),
+    errorBox:          $('errorBox'),
+    errorMsg:          $('errorMsg'),
+    btnAutoProcess:    $('btnAutoProcess'),
+    btnApplyManual:    $('btnApplyManual'),
+    btnBatchProcess:   $('btnBatchProcess'),
+    btnClearAll:       $('btnClearAll'),
+    btnRemoveRef:      $('btnRemoveRef'),
   };
 }
 
@@ -70,14 +70,10 @@ function showError(msg) {
   if (!dom.errorBox) return;
   dom.errorMsg.textContent = msg;
   dom.errorBox.hidden = false;
-  // 10 sn sonra otomatik kapat
   clearTimeout(showError._timer);
   showError._timer = setTimeout(() => { dom.errorBox.hidden = true; }, 10_000);
 }
-
-function hideError() {
-  if (dom.errorBox) dom.errorBox.hidden = true;
-}
+function hideError() { if (dom.errorBox) dom.errorBox.hidden = true; }
 
 /* ── Durum çubuğu ────────────────────────────────────────── */
 function setStatus(msg, type = '') {
@@ -88,34 +84,33 @@ function setStatus(msg, type = '') {
     type === 'ok'    ? 'var(--success)' : 'var(--text-dim)';
 }
 
-/* ── İşleme butonları: kilitle / aç ─────────────────────── */
+/* ── İşleme butonları ────────────────────────────────────── */
 function setProcessingButtons(enabled) {
   [dom.btnAutoProcess, dom.btnApplyManual, dom.btnBatchProcess].forEach(btn => {
-    if (!btn) return;
-    btn.disabled = !enabled;
+    if (btn) btn.disabled = !enabled;
   });
+}
+
+/* ── Bilgi paneli sıfırla ────────────────────────────────── */
+function clearInfoPanel() {
+  dom.infoSize.textContent   = '—';
+  dom.infoFormat.textContent = '—';
+  dom.infoStain.textContent  = '—';
+  dom.infoStatus.textContent = '—';
 }
 
 /* ── OpenCV başlatma ─────────────────────────────────────── */
 function initOpenCV() {
-  // Butonlar başta disabled
   setProcessingButtons(false);
   setStatus('OpenCV yükleniyor…');
-
   const onReady = () => {
     state.openCVReady = true;
     setProcessingButtons(true);
     setStatus('Hazır — OpenCV yüklü', 'ok');
     console.log('[app] OpenCV hazır');
   };
-
-  // Module.onRuntimeInitialized zaten index.html'de ayarlı;
-  // bu event'i dinlemek yeterli.
-  if (window.openCVReady) {
-    onReady();
-  } else {
-    window.addEventListener('opencv-ready', onReady, { once: true });
-  }
+  if (window.openCVReady) { onReady(); }
+  else { window.addEventListener('opencv-ready', onReady, { once: true }); }
 }
 
 /* ── Görüntü yükleme ─────────────────────────────────────── */
@@ -155,7 +150,7 @@ function loadImageFile(file) {
   });
 }
 
-/* ── Büyük görüntü ölçekleme ─────────────────────────────── */
+/* ── Canvas ölçekleme ────────────────────────────────────── */
 function downscaleCanvas(canvas, maxPx) {
   const { width: w, height: h } = canvas;
   if (Math.max(w, h) <= maxPx) return { canvas, scale: 1 };
@@ -164,7 +159,6 @@ function downscaleCanvas(canvas, maxPx) {
   const c = document.createElement('canvas');
   c.width = sw; c.height = sh;
   c.getContext('2d').drawImage(canvas, 0, 0, sw, sh);
-  console.log('[app] görüntü küçültüldü: ' + w + 'x' + h + ' → ' + sw + 'x' + sh);
   return { canvas: c, scale };
 }
 
@@ -175,11 +169,12 @@ function upscaleCanvas(small, targetW, targetH) {
   return c;
 }
 
-/* ── Thumbnail ───────────────────────────────────────────── */
-function createThumb(canvas, idx) {
+/* ── Thumbnail — silme düğmesiyle ───────────────────────── */
+function createThumb(canvas, entry) {
   const wrap = document.createElement('div');
   wrap.className = 'thumb-item';
-  wrap.title = state.files[idx].name;
+  wrap.title = entry.name;
+
   const tc = document.createElement('canvas');
   tc.width = 46; tc.height = 46;
   const ratio = Math.min(46 / canvas.width, 46 / canvas.height);
@@ -187,10 +182,91 @@ function createThumb(canvas, idx) {
   tc.getContext('2d').drawImage(canvas, (46 - tw) / 2, (46 - th) / 2, tw, th);
   const img = document.createElement('img');
   img.src = tc.toDataURL('image/jpeg', 0.7);
+
+  // Silme düğmesi (hover'da görünür)
+  const del = document.createElement('button');
+  del.className = 'thumb-delete';
+  del.title = 'Bu görüntüyü sil';
+  del.innerHTML = '&times;';
+  del.addEventListener('click', e => { e.stopPropagation(); removeImage(entry); });
+
   wrap.appendChild(img);
-  wrap.addEventListener('click', () => activateImage(idx));
+  wrap.appendChild(del);
+
+  wrap.addEventListener('click', () => {
+    const idx = state.files.indexOf(entry);
+    if (idx >= 0) activateImage(idx);
+  });
+
+  entry.thumb = wrap;
   dom.thumbBar.appendChild(wrap);
   return wrap;
+}
+
+/* ── Görüntü sil ─────────────────────────────────────────── */
+function removeImage(entry) {
+  const idx = state.files.indexOf(entry);
+  if (idx < 0) return;
+
+  // DOM temizliği
+  entry.thumb && entry.thumb.remove();
+  entry.batchItem && entry.batchItem.remove();
+
+  // Durum temizliği
+  state.files.splice(idx, 1);
+
+  if (state.files.length === 0) {
+    state.activeIdx = -1;
+    dom.canvasEmpty.hidden = false;
+    dom.viewerWrap.hidden  = true;
+    clearInfoPanel();
+    setStatus('Tüm görüntüler silindi');
+    return;
+  }
+
+  // Seçili indeksi güncelle
+  if (state.activeIdx === idx) {
+    // Silinen aktifti → aynı pozisyondaki (veya son) görüntüyü seç
+    activateImage(Math.min(idx, state.files.length - 1));
+  } else if (state.activeIdx > idx) {
+    // Silinen aktifin önündeydi → indexi bir azalt, sadece vurguyu güncelle
+    state.activeIdx--;
+    dom.thumbBar.querySelectorAll('.thumb-item').forEach((t, i) =>
+      t.classList.toggle('active', i === state.activeIdx));
+  }
+
+  setStatus(state.files.length + ' görüntü', 'ok');
+}
+
+/* ── Tümünü temizle ──────────────────────────────────────── */
+function clearAllImages() {
+  state.files.forEach(e => {
+    e.thumb     && e.thumb.remove();
+    e.batchItem && e.batchItem.remove();
+  });
+  state.files   = [];
+  state.activeIdx = -1;
+  dom.canvasEmpty.hidden = false;
+  dom.viewerWrap.hidden  = true;
+  clearInfoPanel();
+  setStatus('Tüm görüntüler temizlendi');
+}
+
+/* ── Referansı kaldır ────────────────────────────────────── */
+function removeRef() {
+  if (typeof Pipeline !== 'undefined' && Pipeline.clearCustomRef) {
+    Pipeline.clearCustomRef();
+  }
+  dom.refThumb.style.display = 'none';
+  dom.refThumb.innerHTML = '';
+  // İlk preset'i aktif yap
+  const first = document.querySelector('.btn-preset');
+  if (first) {
+    document.querySelectorAll('.btn-preset').forEach(b => b.classList.remove('active'));
+    first.classList.add('active');
+    Pipeline.setPreset(first.dataset.preset);
+  }
+  setStatus('Referans kaldırıldı, varsayılan preset aktif', 'ok');
 }
 
 /* ── Dosyaları ekle ──────────────────────────────────────── */
@@ -206,9 +282,8 @@ async function addFiles(files) {
         origCanvas: canvas, resultCanvas: null,
         processed: false, stainType: '—',
       };
-      const idx = state.files.length;
       state.files.push(entry);
-      entry.thumb = createThumb(canvas, idx);
+      createThumb(canvas, entry);
 
       const bItem = document.createElement('div');
       bItem.className = 'batch-item';
@@ -257,7 +332,6 @@ function updateSliderCanvases() {
   const e = state.files[state.activeIdx];
   drawToCanvas(e.origCanvas,                   dom.canvasSliderBase);
   drawToCanvas(e.resultCanvas || e.origCanvas, dom.canvasSliderTop);
-  // Layout sonrası top canvas'ı base canvas display boyutuna eşitle
   requestAnimationFrame(() => {
     const dw = dom.canvasSliderBase.offsetWidth;
     const dh = dom.canvasSliderBase.offsetHeight;
@@ -294,7 +368,6 @@ function setViewMode(mode) {
 }
 
 function updateSliderPosition() {
-  // offsetWidth = CSS display genişliği (piksel genişliği değil)
   const displayW = dom.canvasSliderBase.offsetWidth || dom.canvasSliderBase.width;
   const px = displayW * state.sliderX;
   dom.sliderHandle.style.left   = px + 'px';
@@ -315,7 +388,6 @@ function initSliderDrag() {
 
 /* ── Overlay ─────────────────────────────────────────────── */
 function showProcessing(show, msg = 'İşleniyor…') {
-  // style.display kullan — CSS [hidden] override sorununa karşı güvenli yol
   dom.processingOverlay.style.display = show ? 'flex' : 'none';
   dom.processingMsg.textContent = msg;
   if (!show) {
@@ -331,13 +403,11 @@ function setProgress(pct, msg) {
   if (msg) dom.processingMsg.textContent = msg;
 }
 
-/* ── Zaman aşımı sarmalayıcısı ───────────────────────────── */
+/* ── Zaman aşımı ─────────────────────────────────────────── */
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(
-      () => reject(new Error('İşlem zaman aşımına uğradı (' + ms / 1000 + ' sn)')),
-      ms
-    );
+      () => reject(new Error('İşlem zaman aşımına uğradı (' + ms / 1000 + ' sn)')), ms);
     promise.then(
       val => { clearTimeout(timer); resolve(val); },
       err => { clearTimeout(timer); reject(err); }
@@ -372,9 +442,9 @@ async function processActive() {
   if (state.activeIdx < 0) { showError('Önce bir görüntü yükleyin.'); return; }
   if (!state.openCVReady)  { showError('OpenCV henüz hazır değil, lütfen bekleyin.'); return; }
 
-  const entry  = state.files[state.activeIdx];
-  const origW  = entry.origCanvas.width;
-  const origH  = entry.origCanvas.height;
+  const entry = state.files[state.activeIdx];
+  const origW = entry.origCanvas.width;
+  const origH = entry.origCanvas.height;
 
   hideError();
   showProcessing(true, 'Hazırlanıyor…');
@@ -383,8 +453,6 @@ async function processActive() {
 
   try {
     const opts = getProcessingOpts();
-
-    // Büyük görüntü → küçült (renk düzeltmesi için yeterli)
     const { canvas: workCanvas, scale } = downscaleCanvas(entry.origCanvas, MAX_PROCESS_PX);
 
     const { imgData, stainType } = await withTimeout(
@@ -392,24 +460,19 @@ async function processActive() {
       PROCESS_TIMEOUT_MS
     );
 
-    // Küçük sonuç canvas'ı
     const smallResult = document.createElement('canvas');
     smallResult.width  = imgData.width;
     smallResult.height = imgData.height;
     smallResult.getContext('2d').putImageData(imgData, 0, 0);
 
-    // Orijinal boyuta geri döndür (gerekiyorsa)
-    const result = scale < 1
-      ? upscaleCanvas(smallResult, origW, origH)
-      : smallResult;
+    const result = scale < 1 ? upscaleCanvas(smallResult, origW, origH) : smallResult;
 
     entry.resultCanvas = result;
     entry.processed    = true;
     entry.stainType    = stainType === 'ihk' ? 'İHK (DAB)' : 'H&E';
 
-    // Thumbnail rozetini güncelle
     const badge = entry.thumb.querySelector('.thumb-status') || document.createElement('span');
-    badge.className  = 'thumb-status done';
+    badge.className   = 'thumb-status done';
     badge.textContent = '✓';
     entry.thumb.appendChild(badge);
 
@@ -431,12 +494,12 @@ async function processActive() {
 
   } finally {
     console.log('[app] processActive finally — overlay kapatılıyor');
-    showProcessing(false);       // HER DURUMDA kapat
-    setProcessingButtons(true);  // HER DURUMDA butonları aç
+    showProcessing(false);
+    setProcessingButtons(true);
   }
 }
 
-/* ── Manuel ayar uygula ──────────────────────────────────── */
+/* ── Manuel ayar — TAM çözünürlükte uygula ──────────────── */
 async function applyManualOpts() {
   if (state.activeIdx < 0) { showError('Önce bir görüntü yükleyin.'); return; }
   if (!state.openCVReady)  { showError('OpenCV henüz hazır değil.'); return; }
@@ -475,12 +538,69 @@ async function applyManualOpts() {
   }
 }
 
+/* ── Canlı önizleme (kaydırıcı oynayınca, ~100 ms gecikme) ─ */
+function scheduleLivePreview() {
+  if (state.activeIdx < 0 || !state.openCVReady) return;
+  clearTimeout(_liveTimer);
+  _liveTimer = setTimeout(runLivePreview, 100);
+}
+
+async function runLivePreview() {
+  if (state.activeIdx < 0 || !state.openCVReady) return;
+  if (_livePending) { _liveNeeded = true; return; }
+  _livePending = true;
+  _liveNeeded  = false;
+
+  try {
+    const entry = state.files[state.activeIdx];
+    if (!entry) return;
+
+    // Küçük kopya üzerinde çalış (hız için)
+    const src   = entry.resultCanvas || entry.origCanvas;
+    const { canvas: small } = downscaleCanvas(src, LIVE_PREVIEW_PX);
+    const opts  = {
+      ...getProcessingOpts(),
+      flatField: false, whiteBalance: false, stainNorm: false,
+      clahe: false, sharpen: false, applyManual: true,
+    };
+    const { imgData } = await Pipeline.process(small, opts, null);
+
+    const preview = document.createElement('canvas');
+    preview.width  = imgData.width;
+    preview.height = imgData.height;
+    preview.getContext('2d').putImageData(imgData, 0, 0);
+
+    // Sonra tuvaline çiz
+    drawToCanvas(preview, dom.canvasAfter);
+
+    // Kaydırmalı görünümdeki üst katmanı da güncelle
+    drawToCanvas(preview, dom.canvasSliderTop);
+    requestAnimationFrame(() => {
+      const dw = dom.canvasSliderBase.offsetWidth;
+      const dh = dom.canvasSliderBase.offsetHeight;
+      if (dw > 0) {
+        dom.canvasSliderTop.style.width  = dw + 'px';
+        dom.canvasSliderTop.style.height = dh + 'px';
+      }
+      updateSliderPosition();
+    });
+  } catch (err) {
+    console.warn('[app] canlı önizleme hatası:', err.message || err);
+  } finally {
+    _livePending = false;
+    if (_liveNeeded) {
+      _liveNeeded = false;
+      setTimeout(runLivePreview, 50);
+    }
+  }
+}
+
 /* ── Toplu işleme ─────────────────────────────────────────── */
 async function processAll() {
   for (let i = 0; i < state.files.length; i++) {
     activateImage(i);
     await processActive();
-    await new Promise(r => setTimeout(r, 30)); // UI nefes alsın
+    await new Promise(r => setTimeout(r, 30));
   }
   setStatus(state.files.length + ' görüntü işlendi', 'ok');
 }
@@ -489,7 +609,7 @@ async function processAll() {
 async function loadRef(file) {
   if (!state.openCVReady) { showError('OpenCV henüz hazır değil.'); return; }
   try {
-    const canvas = await loadImageFile(file);
+    const canvas  = await loadImageFile(file);
     const imgData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
     const rgba = cv.matFromImageData(imgData);
     const bgr  = new cv.Mat();
@@ -580,27 +700,37 @@ async function exportBatch() {
 }
 
 /* ── Kaydırıcı senkronizasyonu ───────────────────────────── */
-function syncSlider(inputId, valueId) {
+// live: true → kaydırılınca canlı önizleme tetikle
+function syncSlider(inputId, valueId, live = false) {
   const input = $(inputId), span = $(valueId);
   if (!input || !span) return;
-  input.addEventListener('input', () => { span.textContent = input.value; });
+  input.addEventListener('input', () => {
+    span.textContent = input.value;
+    if (live) scheduleLivePreview();
+  });
 }
 
 /* ── Olayları bağla ──────────────────────────────────────── */
 function bindEvents() {
-  // Hata kutusu kapat
+  // Hata kutusu
   $('btnErrorClose').addEventListener('click', hideError);
 
   // Sürükle-bırak
   dom.dropZone.addEventListener('click', () => dom.fileInput.click());
   dom.fileInput.addEventListener('change', e => addFiles(e.target.files));
-  dom.dropZone.addEventListener('dragover', e => { e.preventDefault(); dom.dropZone.classList.add('drag-over'); });
+  dom.dropZone.addEventListener('dragover',  e => { e.preventDefault(); dom.dropZone.classList.add('drag-over'); });
   dom.dropZone.addEventListener('dragleave', () => dom.dropZone.classList.remove('drag-over'));
   dom.dropZone.addEventListener('drop', e => {
     e.preventDefault();
     dom.dropZone.classList.remove('drag-over');
     addFiles(e.dataTransfer.files);
   });
+
+  // Tümünü temizle
+  if (dom.btnClearAll) dom.btnClearAll.addEventListener('click', clearAllImages);
+
+  // Referans kaldır
+  if (dom.btnRemoveRef) dom.btnRemoveRef.addEventListener('click', removeRef);
 
   // Görünüm
   document.querySelectorAll('.view-btn').forEach(btn =>
@@ -613,19 +743,37 @@ function bindEvents() {
 
   // İşleme
   dom.btnAutoProcess.addEventListener('click',  processActive);
-  dom.btnApplyManual.addEventListener('click',  applyManualOpts);
   dom.btnBatchProcess.addEventListener('click', processAll);
 
-  // Sıfırla
+  // "Uygula" — tam çözünürlükte manuel ayar
+  dom.btnApplyManual.addEventListener('click', applyManualOpts);
+
+  // "Sıfırla" — kaydırıcıları varsayılana döndür, görüntüyü orijinal sonuca geri al
   $('btnResetManual').addEventListener('click', () => {
     ['sBrightness','sContrast','sSaturation','sTemperature'].forEach(id => $(id).value = 0);
     ['sHema','sEosin','sDAB'].forEach(id => $(id).value = 100);
     $('sSharpen').value   = 0;
-    $('sFlatField').value = 50;
+    $('sFlatField').value = 28;
     document.querySelectorAll('.slider-val').forEach(s => {
       const inp = s.previousElementSibling;
       if (inp && inp.type === 'range') s.textContent = inp.value;
     });
+    // canvasAfter'ı işlenmiş (ya da orijinal) sonuca döndür
+    if (state.activeIdx >= 0) {
+      const e = state.files[state.activeIdx];
+      const src = e.resultCanvas || e.origCanvas;
+      drawToCanvas(src, dom.canvasAfter);
+      drawToCanvas(src, dom.canvasSliderTop);
+      requestAnimationFrame(() => {
+        const dw = dom.canvasSliderBase.offsetWidth;
+        const dh = dom.canvasSliderBase.offsetHeight;
+        if (dw > 0) {
+          dom.canvasSliderTop.style.width  = dw + 'px';
+          dom.canvasSliderTop.style.height = dh + 'px';
+        }
+        updateSliderPosition();
+      });
+    }
   });
 
   // Dışa aktar
@@ -635,11 +783,11 @@ function bindEvents() {
     dom.jpgQualityRow.style.display = e.target.value === 'jpeg' ? '' : 'none';
   });
 
-  // Referans (opsiyonel)
+  // Referans
   $('btnLoadRef').addEventListener('click', () => dom.refInput.click());
   dom.refInput.addEventListener('change', e => { if (e.target.files[0]) loadRef(e.target.files[0]); });
 
-  // Hazır presetler
+  // Presetler
   document.querySelectorAll('.btn-preset').forEach(btn =>
     btn.addEventListener('click', () => {
       document.querySelectorAll('.btn-preset').forEach(b => b.classList.remove('active'));
@@ -655,24 +803,31 @@ function bindEvents() {
         lbl.classList.toggle('active', lbl.querySelector('input') === radio));
     }));
 
-  // Slider (önce/sonra)
+  // Kaydırmalı görünüm
   initSliderDrag();
 
-  // Kaydırıcı senkronizasyonu
-  [['sBrightness','vBrightness'],['sContrast','vContrast'],
-   ['sSaturation','vSaturation'],['sTemperature','vTemperature'],
-   ['sHema','vHema'],['sEosin','vEosin'],['sDAB','vDAB'],
-   ['sSharpen','vSharpen'],['sFlatField','vFlatField'],
-   ['exportQuality','vExportQuality']
-  ].forEach(([i, v]) => syncSlider(i, v));
+  // Kaydırıcı senkronizasyonu + canlı önizleme
+  // live=true → parlaklık/kontrast/doygunluk/sıcaklık/boya değişince anında yansı
+  [
+    ['sBrightness',   'vBrightness',    true],
+    ['sContrast',     'vContrast',      true],
+    ['sSaturation',   'vSaturation',    true],
+    ['sTemperature',  'vTemperature',   true],
+    ['sHema',         'vHema',          true],
+    ['sEosin',        'vEosin',         true],
+    ['sDAB',          'vDAB',           true],
+    ['sSharpen',      'vSharpen',       true],
+    ['sFlatField',    'vFlatField',     false],  // pipeline adımı, manuel değil
+    ['exportQuality', 'vExportQuality', false],
+  ].forEach(([i, v, lp]) => syncSlider(i, v, lp));
 
   // Manuel bölüm daralt/genişlet
   $('btnCollapseManual').addEventListener('click', () => {
     const sl  = $('manualSliders');
     const btn = $('btnCollapseManual');
     const collapsed = sl.style.display === 'none';
-    sl.style.display    = collapsed ? '' : 'none';
-    btn.textContent = collapsed ? '▾' : '▸';
+    sl.style.display = collapsed ? '' : 'none';
+    btn.textContent  = collapsed ? '▾' : '▸';
   });
 
   // En/boy kilidi

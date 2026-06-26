@@ -170,6 +170,28 @@ html, body {
 .thumb-status.done { background: var(--success); color: #000; }
 .thumb-status.error { background: var(--danger); color: #fff; }
 
+/* Silme düğmesi — hover'da görünür */
+.thumb-delete {
+  position: absolute;
+  top: 0; right: 0;
+  width: 16px; height: 16px;
+  background: var(--danger);
+  color: #fff;
+  border: none;
+  border-radius: 0 2px 0 3px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  z-index: 2;
+}
+.thumb-item:hover .thumb-delete { display: flex; }
+.thumb-delete:hover { background: #ff2222; }
+
 /* ── Radio Group ─────────────────────────────────────────── */
 .radio-group {
   display: flex;

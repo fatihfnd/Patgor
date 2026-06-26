@@ -338,6 +338,11 @@ const Pipeline = (() => {
     }
   }
 
+  function clearCustomRef() {
+    customRefStats = null;
+    console.log('[pipeline] özel ref silindi, aktif preset: ' + activePreset);
+  }
+
   // normBlend: normalize ile orijinali karıştır → eozin aşırı doygunlaşmaz
   function reinhardNormalize(src, hemaScale, eosinScale) {
     console.log('[pipeline] 4- normalizasyon  hema=' + hemaScale
@@ -454,6 +459,45 @@ const Pipeline = (() => {
     return result;
   }
 
+  /* ── Adım 2b: Highlight yumuşatma (soft clip) ───────────── */
+  // knee–255 aralığını [knee, targetMax] aralığına yumuşak geçişle sıkıştırır.
+  // cv.LUT ile piksel başına O(1) — cv.LUT(src, 1×256 CV_8U, dst) çağrısı.
+  function highlightProtect(src, knee, targetMax) {
+    knee      = (knee      !== undefined) ? knee      : 215;
+    targetMax = (targetMax !== undefined) ? targetMax : 248;
+    console.log('[pipeline] highlight knee=' + knee + ' targetMax=' + targetMax);
+
+    const lutArr = new Uint8Array(256);
+    for (let v = 0; v < 256; v++) {
+      if (v <= knee) {
+        lutArr[v] = v;
+      } else {
+        const t      = (v - knee) / (255 - knee);
+        const smooth = t * t * (3 - 2 * t);  // smoothstep
+        lutArr[v]    = Math.round(knee + (targetMax - knee) * smooth);
+      }
+    }
+
+    const lutMat = cv.matFromArray(1, 256, cv.CV_8U, Array.from(lutArr));
+    const result = new cv.Mat();
+    cv.LUT(src, lutMat, result);
+    lutMat.delete();
+    return result;
+  }
+
+  /* ── Yanmış piksel yüzdesi (≥249) ───────────────────────── */
+  function burnedPixelPct(bgr) {
+    try {
+      const gray   = new cv.Mat();
+      cv.cvtColor(bgr, gray, cv.COLOR_BGR2GRAY);
+      const thresh = new cv.Mat();
+      cv.threshold(gray, thresh, 248, 255, cv.THRESH_BINARY);
+      const pct = cv.countNonZero(thresh) / (bgr.rows * bgr.cols) * 100;
+      gray.delete(); thresh.delete();
+      return pct;
+    } catch (_) { return 0; }
+  }
+
   /* ── Adım 6: Gölge tabanı ────────────────────────────────── */
   // [0,255] → [shadowBase, 255]: siyah 0'dan shadowBase'e kaldırılır.
   // Kromatin ve nükleer detay korunur; siyaha yapışma önlenir.
@@ -562,6 +606,14 @@ const Pipeline = (() => {
       await runStep('Beyaz dengesi ayarlanıyor…', 25, m => whiteBalance(m));
     }
 
+    // 2b. Highlight yumuşatma — WB sonrası zemin/parlak piksel clipping'i önle
+    if (opts.whiteBalance || opts.flatField) {
+      const before = burnedPixelPct(mat);
+      await runStep('Highlight koruması…', 30, m => highlightProtect(m));
+      console.log('[pipeline] yanmış piksel: önce=' + before.toFixed(2)
+        + '%  sonra=' + burnedPixelPct(mat).toFixed(2) + '%');
+    }
+
     // — Beyaz dengesi sonrası arka plan maskesi ve referans kopyasını hazırla —
     let bgMask  = null;
     const wbRef = mat.clone();  // CLAHE/sharpen'dan korunacak arka plan için referans
@@ -664,5 +716,5 @@ const Pipeline = (() => {
     return { imgData, stainType };
   }
 
-  return { process, setPreset, setCustomRef, detectStain };
+  return { process, setPreset, setCustomRef, clearCustomRef, detectStain };
 })();
