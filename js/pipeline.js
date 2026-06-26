@@ -553,25 +553,24 @@ const Pipeline = (() => {
     return result;
   }
 
-  /* ── Siyah kenar kırpma (telefon/oküler çekimi) ─────────── */
-  // Düşük eşiğin altındaki dış siyah halkayı morphological closing ile doldur,
-  // en büyük parlak bölgenin bounding rect'ini bul ve kırp.
-  function cropBlackBorder(src, threshold) {
-    threshold = (threshold !== undefined) ? threshold : 22;
-    console.log('[pipeline] siyah kenar kırpma threshold=' + threshold);
-
+  /* ── Dairesel görüş alanı tespiti + doldurma ─────────────── */
+  // Telefon/oküler çekimlerinde daire dışı siyah alan istatistikleri bozar:
+  //   • flat-field: siyah bölge blurun düşmesine → bölme faktörü büyür → patlama
+  //   • WB/normalizasyon: siyah pikseller ortalamayı düşürür → aşırı telafi
+  // Çözüm: daireyi bul → dışını nötr gri ile doldur → normal boru hattı → sonda kırp.
+  function detectAndFillCircularFOV(src) {
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_BGR2GRAY);
-    const binary = new cv.Mat();
-    cv.threshold(gray, binary, threshold, 255, cv.THRESH_BINARY);
+
+    const thr = new cv.Mat();
+    cv.threshold(gray, thr, 28, 255, cv.THRESH_BINARY);
     gray.delete();
 
-    // Küçük delikleri kapat (boyuta orantılı kernel)
-    const ks = (Math.round(Math.min(src.cols, src.rows) * 0.03) | 1) || 21;
+    const ks = Math.max(21, (Math.round(Math.min(src.cols, src.rows) * 0.025) | 1));
     const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ks, ks));
     const closed = new cv.Mat();
-    cv.morphologyEx(binary, closed, cv.MORPH_CLOSE, kernel);
-    kernel.delete(); binary.delete();
+    cv.morphologyEx(thr, closed, cv.MORPH_CLOSE, kernel);
+    kernel.delete(); thr.delete();
 
     const contours  = new cv.MatVector();
     const hierarchy = new cv.Mat();
@@ -580,8 +579,8 @@ const Pipeline = (() => {
 
     if (contours.size() === 0) {
       contours.delete();
-      console.log('[pipeline] siyah kenar: içerik kontur bulunamadı');
-      return src.clone();
+      console.log('[pipeline] dairesel alan: kontur bulunamadı');
+      return { valid: false };
     }
 
     let maxArea = 0, maxIdx = 0;
@@ -589,23 +588,57 @@ const Pipeline = (() => {
       const a = cv.contourArea(contours.get(i));
       if (a > maxArea) { maxArea = a; maxIdx = i; }
     }
+
+    const areaFrac = maxArea / (src.cols * src.rows);
+    if (areaFrac < 0.15) {
+      for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
+      contours.delete();
+      console.log('[pipeline] dairesel alan: alan çok küçük ('
+        + (areaFrac * 100).toFixed(1) + '%), atlandı');
+      return { valid: false };
+    }
+
     const rect = cv.boundingRect(contours.get(maxIdx));
     for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
     contours.delete();
 
-    if (rect.width < src.cols * 0.30 || rect.height < src.rows * 0.30) {
-      console.log('[pipeline] siyah kenar: içerik çok küçük, kırpılmadı');
-      return src.clone();
-    }
+    const cx = Math.round(rect.x + rect.width  / 2);
+    const cy = Math.round(rect.y + rect.height / 2);
+    const r  = Math.round(Math.min(rect.width, rect.height) / 2);
 
-    const margin = Math.round(Math.min(rect.width, rect.height) * 0.01);
-    const x = Math.max(0, rect.x - margin);
-    const y = Math.max(0, rect.y - margin);
-    const w = Math.min(src.cols - x, rect.width  + 2 * margin);
-    const h = Math.min(src.rows - y, rect.height + 2 * margin);
+    console.log('[pipeline] daire bulundu: merkez=(' + cx + ',' + cy
+      + ')  r=' + r + '  alan=' + (areaFrac * 100).toFixed(1) + '%');
 
+    // Daire içinin ortalama parlaklığı → güvenli dolgu değeri (zemin camını taklit eder)
+    const circleMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
+    cv.circle(circleMask, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
+    const inMean = cv.mean(src, circleMask);
+    circleMask.delete();
+    const meanVal = (inMean[0] + inMean[1] + inMean[2]) / 3;
+    // meanVal + 30: doku ortalamasından biraz daha parlak, saf cam gibi görünür
+    const fillVal = Math.round(Math.max(200, Math.min(235, meanVal + 30)));
+
+    // Daire dışını fillVal ile doldur
+    const result = src.clone();
+    const bgMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(255));
+    cv.circle(bgMask, new cv.Point(cx, cy), r, new cv.Scalar(0), -1);
+    const fill = new cv.Mat(src.rows, src.cols, src.type(),
+      new cv.Scalar(fillVal, fillVal, fillVal, 255));
+    fill.copyTo(result, bgMask);
+    fill.delete(); bgMask.delete();
+
+    console.log('[pipeline] daire dışı fillVal=' + fillVal + ' ile dolduruldu');
+    return { valid: true, result, cx, cy, r };
+  }
+
+  function cropToCircleBounds(src, cx, cy, r) {
+    const margin = Math.max(4, Math.round(r * 0.015));
+    const x = Math.max(0, cx - r - margin);
+    const y = Math.max(0, cy - r - margin);
+    const w = Math.min(src.cols - x, (r + margin) * 2);
+    const h = Math.min(src.rows - y, (r + margin) * 2);
     const result = src.roi(new cv.Rect(x, y, w, h)).clone();
-    console.log('[pipeline] siyah kenar kırpıldı: '
+    console.log('[pipeline] daire kırpıldı: '
       + src.cols + 'x' + src.rows + ' → ' + w + 'x' + h);
     return result;
   }
@@ -685,9 +718,22 @@ const Pipeline = (() => {
       await yieldUI();
     };
 
-    // 0. Siyah kenar kırpma (telefon/oküler çekimi)
+    // 0. Dairesel görüş alanı: dış siyah halkayı nötr değerle doldur
+    //    (flat-field ve WB istatistiklerini korumak için sona kırpılır)
+    let circleInfo = null;
     if (opts.cropBorder) {
-      await runStep('Siyah kenar kırpılıyor…', 6, m => cropBlackBorder(m));
+      report(5, 'Dairesel alan tespit ediliyor…');
+      await yieldUI();
+      try {
+        const ci = detectAndFillCircularFOV(mat);
+        if (ci.valid) {
+          mat.delete();
+          mat = ci.result;
+          circleInfo = { cx: ci.cx, cy: ci.cy, r: ci.r };
+        }
+      } catch (e) {
+        console.warn('[pipeline] daire tespiti hatası:', e);
+      }
     }
 
     // Boya algılama
@@ -812,6 +858,17 @@ const Pipeline = (() => {
     // Temizlik
     wbRef.delete();
     if (bgMask) bgMask.delete();
+
+    // Son: dairesel kırpma — tüm renk işlemleri SONRASI (koordinatlar hâlâ geçerli)
+    if (circleInfo) {
+      try {
+        const cropped = cropToCircleBounds(mat, circleInfo.cx, circleInfo.cy, circleInfo.r);
+        mat.delete();
+        mat = cropped;
+      } catch (e) {
+        console.warn('[pipeline] daire kırpma hatası:', e);
+      }
+    }
 
     report(98, 'Sonuç hazırlanıyor…');
     await yieldUI();

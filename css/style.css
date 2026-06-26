@@ -69,12 +69,135 @@ html, body {
   border: 1px solid var(--border);
 }
 
+/* ── Sekme çubuğu ───────────────────────────────────────── */
+.app-tabs {
+  position: fixed;
+  top: var(--header-h);
+  left: 0; right: 0;
+  height: 36px;
+  display: flex;
+  align-items: stretch;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  z-index: 99;
+}
+.app-tab {
+  padding: 0 22px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s;
+}
+.app-tab:hover  { color: var(--text); }
+.app-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
 /* ── Layout ─────────────────────────────────────────────── */
+.tab-content { display: contents; }
+[hidden].tab-content { display: none !important; }
+
 .app-layout {
   display: flex;
   height: 100vh;
-  padding-top: var(--header-h);
+  padding-top: calc(var(--header-h) + 36px);
 }
+
+/* ── Kolaj yerleşimi ─────────────────────────────────────── */
+.collage-layout {
+  display: flex;
+  height: 100vh;
+  padding-top: calc(var(--header-h) + 36px);
+}
+.cg-panel {
+  width: var(--panel-w);
+  min-width: var(--panel-w);
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cg-canvas-area {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+.cg-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+  line-height: 1.6;
+}
+.cg-hint kbd {
+  background: var(--bg-section);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 10px;
+}
+#cgGridWrap {
+  overflow: auto;
+  max-width: 100%;
+}
+
+/* ── Kolaj hücreleri ─────────────────────────────────────── */
+.cg-cell { position: relative; cursor: crosshair; }
+.cg-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%; height: 100%;
+  color: var(--text-dim);
+  font-size: 22px;
+  border: 2px dashed var(--border);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.cg-empty:hover { border-color: var(--accent); background: var(--bg-hover); }
+
+.cg-handle, .cg-del {
+  position: absolute;
+  top: 4px;
+  z-index: 6;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.cg-handle {
+  right: 28px;
+  background: rgba(0,0,0,.55);
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-size: 14px;
+  cursor: grab;
+  user-select: none;
+}
+.cg-del {
+  right: 4px;
+  background: rgba(200,40,40,.75);
+  color: #fff;
+  border: none;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+.cg-cell:hover .cg-handle,
+.cg-cell:hover .cg-del { opacity: 1; }
+
+.cg-drop-over { outline: 2px solid var(--accent) !important; }
 
 /* ── Panels ─────────────────────────────────────────────── */
 .panel {

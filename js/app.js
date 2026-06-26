@@ -706,84 +706,6 @@ async function exportBatch() {
   }
 }
 
-/* ── Figür / kolaj oluşturucu ────────────────────────────── */
-async function createFigure() {
-  if (state.files.length === 0) { showError('Önce görüntü yükleyin.'); return; }
-
-  const cols     = Math.max(1, parseInt($('figCols').value)      || 2);
-  const rows     = Math.max(1, parseInt($('figRows').value)      || 2);
-  const gap      = Math.max(0, parseInt($('figGap').value)       || 8);
-  const bg       = $('figBg').value;
-  const lstyle   = $('figLabelStyle').value;
-  const labelSz  = Math.max(12, parseInt($('figLabelSize').value) || 48);
-  const labelClr = $('figLabelColor').value;
-  const panelSz  = Math.max(64, parseInt($('figPanelSize').value) || 1000);
-  const format   = $('exportFormat').value;
-  const quality  = parseInt($('exportQuality').value);
-
-  const images = state.files
-    .map(e => e.resultCanvas || e.origCanvas)
-    .filter(Boolean)
-    .slice(0, rows * cols);
-
-  if (images.length === 0) { showError('İşlenmiş görüntü yok.'); return; }
-
-  const totalW = cols * panelSz + (cols + 1) * gap;
-  const totalH = rows * panelSz + (rows + 1) * gap;
-
-  const fig = document.createElement('canvas');
-  fig.width = totalW; fig.height = totalH;
-  const ctx = fig.getContext('2d');
-
-  if (bg !== 'transparent') {
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, totalW, totalH);
-  }
-
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-
-  for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) {
-      const idx = r * cols + c;
-      const img = images[idx];
-      if (!img) continue;
-
-      const px = gap + c * (panelSz + gap);
-      const py = gap + r * (panelSz + gap);
-
-      // Fit-inside panelSz × panelSz (letterbox)
-      const sc = Math.min(panelSz / img.width, panelSz / img.height);
-      const dw = Math.round(img.width * sc);
-      const dh = Math.round(img.height * sc);
-      ctx.drawImage(img, px + Math.floor((panelSz - dw) / 2),
-                        py + Math.floor((panelSz - dh) / 2), dw, dh);
-
-      // Panel etiketi
-      let label = '';
-      if (lstyle === 'upper') label = String.fromCharCode(65 + idx);
-      else if (lstyle === 'lower') label = String.fromCharCode(97 + idx);
-      else if (lstyle === 'num')   label = String(idx + 1);
-      if (label) {
-        ctx.font = 'bold ' + labelSz + 'px sans-serif';
-        const lx = px + gap + 2;
-        const ly = py + gap + labelSz;
-        ctx.strokeStyle = labelClr === '#ffffff' ? '#000' : '#fff';
-        ctx.lineWidth   = Math.max(1, labelSz / 7);
-        ctx.strokeText(label, lx, ly);
-        ctx.fillStyle = labelClr;
-        ctx.fillText(label, lx, ly);
-      }
-    }
-  }
-
-  setStatus('Figür indiriliyor…');
-  const ext  = format === 'jpeg' ? 'jpg' : (format === 'tiff' ? 'tiff' : 'png');
-  const blob = await canvasToBlob(fig, format, quality);
-  downloadBlob(blob, 'figure_' + cols + 'x' + rows + '.' + ext);
-  setStatus('Figür indirildi (' + cols + '×' + rows + ', ' + images.length + ' panel)', 'ok');
-}
-
 /* ── Kaydırıcı senkronizasyonu ───────────────────────────── */
 // live: true → kaydırılınca canlı önizleme tetikle
 function syncSlider(inputId, valueId, live = false) {
@@ -864,16 +786,19 @@ function bindEvents() {
   // Dışa aktar
   $('btnExportSingle').addEventListener('click', exportSingle);
   $('btnExportBatch').addEventListener('click',  exportBatch);
-  $('btnCreateFigure').addEventListener('click', createFigure);
 
-  // Figür panel sayısı ipucu
-  const updateFigHint = () => {
-    const hint = $('figPanelCountHint');
-    if (hint) hint.textContent =
-      (parseInt($('figRows').value) || 2) * (parseInt($('figCols').value) || 2);
-  };
-  $('figRows').addEventListener('input', updateFigHint);
-  $('figCols').addEventListener('input', updateFigHint);
+  // Sekme geçişi
+  $('appTabs').addEventListener('click', e => {
+    const btn = e.target.closest('.app-tab');
+    if (!btn) return;
+    document.querySelectorAll('.app-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    $('tabEditor').hidden  = tab !== 'editor';
+    $('tabCollage').hidden = tab !== 'collage';
+    if (tab === 'collage') Collage.onTabActivated();
+  });
+
   $('exportFormat').addEventListener('change', e => {
     dom.jpgQualityRow.style.display = e.target.value === 'jpeg' ? '' : 'none';
   });
@@ -945,4 +870,5 @@ document.addEventListener('DOMContentLoaded', () => {
   initDom();
   bindEvents();
   initOpenCV();
+  try { Collage.init(); } catch (e) { console.error('[app] Collage.init hatası:', e); }
 });

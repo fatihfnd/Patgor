@@ -17,6 +17,13 @@
     <div class="header-status" id="statusBar">Hazır</div>
   </header>
 
+  <!-- Sekme çubuğu -->
+  <nav class="app-tabs" id="appTabs">
+    <button class="app-tab active" data-tab="editor">🔬 Düzeltme</button>
+    <button class="app-tab" data-tab="collage">🖼 Kolaj / Figür</button>
+  </nav>
+
+  <div class="tab-content" id="tabEditor">
   <div class="app-layout">
 
     <!-- LEFT PANEL: Controls -->
@@ -311,62 +318,6 @@
         </div>
       </section>
 
-      <!-- Figür / Kolaj Oluşturucu -->
-      <section class="ctrl-section">
-        <h2 class="section-title">Figür Oluşturucu</h2>
-        <div class="form-row">
-          <label>Sütun</label>
-          <input type="number" id="figCols" min="1" max="6" value="2" style="width:60px" />
-          <label style="margin-left:8px">Satır</label>
-          <input type="number" id="figRows" min="1" max="6" value="2" style="width:60px" />
-        </div>
-        <div class="form-row">
-          <label>Boşluk (px)</label>
-          <input type="number" id="figGap" min="0" max="200" value="8" style="width:60px" />
-        </div>
-        <div class="form-row">
-          <label>Panel boyutu</label>
-          <input type="number" id="figPanelSize" min="64" max="4000" value="1000" style="width:70px" />
-          <span style="color:var(--text-dim);font-size:11px;margin-left:2px">px</span>
-        </div>
-        <div class="form-row">
-          <label>Arka plan</label>
-          <select id="figBg">
-            <option value="#ffffff">Beyaz</option>
-            <option value="#000000">Siyah</option>
-            <option value="transparent">Şeffaf</option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label>Etiket</label>
-          <select id="figLabelStyle">
-            <option value="none">Yok</option>
-            <option value="upper">A, B, C…</option>
-            <option value="lower">a, b, c…</option>
-            <option value="num">1, 2, 3…</option>
-          </select>
-        </div>
-        <div class="form-row">
-          <label>Etiket boyutu</label>
-          <input type="number" id="figLabelSize" min="12" max="300" value="48" style="width:60px" />
-        </div>
-        <div class="form-row">
-          <label>Etiket rengi</label>
-          <select id="figLabelColor">
-            <option value="#ffffff">Beyaz</option>
-            <option value="#000000">Siyah</option>
-            <option value="#ffff00">Sarı</option>
-          </select>
-        </div>
-        <p style="font-size:10px;color:var(--text-dim);margin:4px 0">
-          İlk <span id="figPanelCountHint">4</span> görüntü kullanılır (yükleme sırası).
-          Format ve DPI yukarıdaki ayarlardan alınır.
-        </p>
-        <button class="btn btn-secondary btn-full" id="btnCreateFigure">
-          🖼 Figür Oluştur ve İndir
-        </button>
-      </section>
-
       <section class="ctrl-section">
         <h2 class="section-title">Hakkında</h2>
         <p class="about-text">
@@ -378,7 +329,140 @@
 
     </aside>
 
-  </div>
+  </div><!-- /app-layout -->
+  </div><!-- /tabEditor -->
+
+  <!-- Kolaj / Figür sekmesi -->
+  <div class="tab-content" id="tabCollage" hidden>
+    <div class="collage-layout">
+
+      <!-- Sol panel: kontroller -->
+      <div class="cg-panel">
+
+        <section class="ctrl-section">
+          <h2 class="section-title">Izgara</h2>
+          <div class="form-row">
+            <label>Sütun</label>
+            <input type="number" id="cgCols" min="1" max="8" value="2" style="width:50px">
+            <label style="margin-left:8px">Satır</label>
+            <input type="number" id="cgRows" min="1" max="8" value="2" style="width:50px">
+          </div>
+          <div class="form-row">
+            <label>Boşluk Y/D (px)</label>
+            <input type="number" id="cgGapH" min="0" max="200" value="8" style="width:50px">
+            <span style="color:var(--text-dim);margin:0 5px">↕</span>
+            <input type="number" id="cgGapV" min="0" max="200" value="8" style="width:50px">
+            <label style="margin-left:6px;display:flex;align-items:center;gap:3px" title="Yatay=dikey kilitle">
+              <input type="checkbox" id="cgLockGap" checked> 🔒
+            </label>
+          </div>
+          <div class="form-row">
+            <label>Arka plan</label>
+            <select id="cgBg">
+              <option value="#ffffff">Beyaz</option>
+              <option value="#000000">Siyah</option>
+              <option value="transparent">Şeffaf</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="ctrl-section">
+          <h2 class="section-title">Etiket</h2>
+          <div class="form-row">
+            <label>Stil</label>
+            <select id="cgLabelStyle">
+              <option value="none">Yok</option>
+              <option value="upper" selected>A, B, C…</option>
+              <option value="lower">a, b, c…</option>
+              <option value="num">1, 2, 3…</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Konum</label>
+            <select id="cgLabelPos">
+              <option value="tl" selected>Sol üst</option>
+              <option value="tr">Sağ üst</option>
+              <option value="bl">Sol alt</option>
+              <option value="br">Sağ alt</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>Boyut (export px)</label>
+            <input type="number" id="cgLabelSize" min="8" max="400" value="64" style="width:65px">
+          </div>
+          <div class="form-row">
+            <label>Renk</label>
+            <select id="cgLabelColor">
+              <option value="#ffffff" selected>Beyaz</option>
+              <option value="#000000">Siyah</option>
+              <option value="#ffff00">Sarı</option>
+              <option value="#ff0000">Kırmızı</option>
+            </select>
+          </div>
+          <label class="toggle-row" style="padding:4px 0;display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="cgLabelBg" checked>
+            <span>Yarı saydam kutu</span>
+          </label>
+        </section>
+
+        <section class="ctrl-section">
+          <h2 class="section-title">Dışa Aktarma</h2>
+          <div class="form-row">
+            <label>Panel (px)</label>
+            <input type="number" id="cgExportW" min="64" max="8000" value="1000" style="width:65px">
+            <span style="color:var(--text-dim);margin:0 3px">×</span>
+            <input type="number" id="cgExportH" min="64" max="8000" value="1000" style="width:65px">
+          </div>
+          <div class="form-row">
+            <label>Format</label>
+            <select id="cgExportFmt">
+              <option value="png" selected>PNG</option>
+              <option value="jpeg">JPEG</option>
+              <option value="tiff">TIFF</option>
+            </select>
+          </div>
+          <div class="form-row" id="cgExportQRow" style="display:none">
+            <label>Kalite</label>
+            <input type="range" id="cgExportQ" min="1" max="100" value="92" style="flex:1">
+            <span id="vCgQ" style="width:28px;text-align:right">92</span>
+          </div>
+          <button class="btn btn-primary btn-full" id="btnCgExport">
+            ⬇ Figürü İndir
+          </button>
+        </section>
+
+        <section class="ctrl-section">
+          <h2 class="section-title">Görüntü Ekle</h2>
+          <div class="drop-zone" id="cgDropZone" style="min-height:70px;padding:10px;cursor:pointer">
+            <span class="drop-icon" style="font-size:20px">🖼</span>
+            <p style="margin:4px 0;font-size:11px">Dosya sürükle veya tıkla</p>
+            <input type="file" id="cgFileInput" accept=".jpg,.jpeg,.png,.tif,.tiff" multiple hidden>
+          </div>
+          <button class="btn btn-outline btn-full" id="btnCgAddAll"
+            style="margin-top:6px;font-size:11px">
+            ＋ Düzeltme sekmesindeki işlenmiş görüntüleri ekle
+          </button>
+          <button class="btn btn-ghost btn-full" id="btnCgClear"
+            style="margin-top:4px;font-size:11px">
+            Tümünü Temizle
+          </button>
+        </section>
+
+      </div><!-- /cg-panel -->
+
+      <!-- Sağ: ızgara alanı -->
+      <div class="cg-canvas-area">
+        <p class="cg-hint">
+          <b>Pan:</b> görüntüye tıklayıp sürükle &nbsp;·&nbsp;
+          <b>Zoom:</b> fare tekerleği &nbsp;·&nbsp;
+          <b>Sırala:</b> <kbd>⠿</kbd> tutacağını sürükle &nbsp;·&nbsp;
+          <b>Kaldır:</b> <kbd>×</kbd>
+        </p>
+        <div id="cgGridWrap"><div id="cgGrid"></div></div>
+      </div>
+
+    </div><!-- /collage-layout -->
+  </div><!-- /tabCollage -->
 
   <!-- Hata kutusu (DOM hazır olsun, her zaman erişilebilir) -->
   <div class="error-box" id="errorBox" hidden>
@@ -407,6 +491,7 @@
 
   <!-- App scripts -->
   <script src="js/pipeline.js"></script>
+  <script src="js/collage.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
