@@ -1,77 +1,82 @@
 /**
  * collage.js — Kolaj / Figür Düzenleyici
  *
- * Panel modeli — önizleme boyutundan bağımsız:
- *   zoomFactor : 1.0 = fit-inside, 2.0 = 2× büyütme
- *   panFracX/Y : kaydırma, CANVAS genişliği/yüksekliğinin kesri cinsinden
- *                (0,0) = ortalanmış (default)
- *
- * Bu sayede exportW/exportH ya da cols/rows değişince görüntü kayması/
- * küçülmesi olmaz — her zaman doğru kadraj export edilir.
+ * Panel modeli (önizleme boyutundan bağımsız):
+ *   zoomFactor : 1.0 = fit-inside, >1 = büyütme
+ *   panFracX/Y : pan, canvas boyutunun kesri cinsinden (0,0 = ortalı)
  */
 'use strict';
 
 const Collage = (() => {
 
-  /* ── Sabitler ──────────────────────────────────────────────── */
   const MIN_CELL_PX = 80;
-  const ASPECT_PRESETS = {
-    '1:1':  [1, 1],
-    '4:3':  [4, 3],
-    '3:2':  [3, 2],
+
+  // Panel oranı ön ayarları (görsel hücre şekli + export H hesabı)
+  const PANEL_ASPECT = {
+    '1:1':  [1,  1],
+    '4:3':  [4,  3],
+    '3:2':  [3,  2],
     '16:9': [16, 9],
     'free': null,
   };
 
-  /* ── Durum ────────────────────────────────────────────────── */
-  const panels = [];   // panel | null;  panel = {canvas,previewSrc,zoomFactor,panFracX,panFracY}
+  /* ── Durum ──────────────────────────────────────────────── */
+  const panels = [];  // {canvas, previewSrc, zoomFactor, panFracX, panFracY} | null
   const cfg = {
     cols: 2, rows: 2, gapH: 8, gapV: 8, lockGap: true,
     bg: '#ffffff',
+    panelAspect: '1:1', panelAspectW: 1, panelAspectH: 1,
     labelStyle: 'upper', labelPos: 'tl',
     labelSize: 64, labelColor: '#ffffff', labelBg: true,
-    exportW: 1000, exportH: 1000,
-    aspect: '1:1',
+    labelFont: 'Arial,Helvetica,sans-serif',
+    strokeEnable: false, strokeColor: '#000000', strokeWidth: 3,
+    exportW: 1000,   // per-panel export genişlik; yük = exportW × panelAspectH/W
   };
 
   let dragSrcIdx = null;
-  let panOp      = null;   // aktif fare sürükleme
+  let panOp      = null;
 
-  /* ── DOM ──────────────────────────────────────────────────── */
+  /* ── DOM ────────────────────────────────────────────────── */
   const $c = id => document.getElementById(id);
   let dom = {};
 
   function initDom() {
     dom = {
-      grid:       $c('cgGrid'),
-      gridWrap:   $c('cgGridWrap'),
-      drop:       $c('cgDropZone'),
-      fileInput:  $c('cgFileInput'),
-      cols:       $c('cgCols'),
-      rows:       $c('cgRows'),
-      gapH:       $c('cgGapH'),
-      gapV:       $c('cgGapV'),
-      lockGap:    $c('cgLockGap'),
-      bg:         $c('cgBg'),
-      lstyle:     $c('cgLabelStyle'),
-      lpos:       $c('cgLabelPos'),
-      lsize:      $c('cgLabelSize'),
-      lcolor:     $c('cgLabelColor'),
-      lbg:        $c('cgLabelBg'),
-      aspect:     $c('cgAspect'),
-      exportW:    $c('cgExportW'),
-      exportH:    $c('cgExportH'),
-      exportHRow: $c('cgExportHRow'),
-      exportFmt:  $c('cgExportFmt'),
-      exportQ:    $c('cgExportQ'),
-      exportQRow: $c('cgExportQRow'),
-      btnExport:  $c('btnCgExport'),
-      btnAddAll:  $c('btnCgAddAll'),
-      btnClear:   $c('btnCgClear'),
+      grid:         $c('cgGrid'),
+      gridWrap:     $c('cgGridWrap'),
+      drop:         $c('cgDropZone'),
+      fileInput:    $c('cgFileInput'),
+      cols:         $c('cgCols'),
+      rows:         $c('cgRows'),
+      gapH:         $c('cgGapH'),
+      gapV:         $c('cgGapV'),
+      lockGap:      $c('cgLockGap'),
+      bg:           $c('cgBg'),
+      panelAspect:  $c('cgPanelAspect'),
+      panelSizeRow: $c('cgPanelSizeRow'),
+      panelW:       $c('cgPanelW'),
+      panelH:       $c('cgPanelH'),
+      lstyle:       $c('cgLabelStyle'),
+      lpos:         $c('cgLabelPos'),
+      lsize:        $c('cgLabelSize'),
+      lcolor:       $c('cgLabelColor'),
+      lbg:          $c('cgLabelBg'),
+      lFont:        $c('cgLabelFont'),
+      strokeEnable: $c('cgStrokeEnable'),
+      strokeColor:  $c('cgStrokeColor'),
+      strokeWidth:  $c('cgStrokeWidth'),
+      exportW:      $c('cgExportW'),
+      exportHInfo:  $c('cgExportHInfo'),
+      exportFmt:    $c('cgExportFmt'),
+      exportQ:      $c('cgExportQ'),
+      exportQRow:   $c('cgExportQRow'),
+      btnExport:    $c('btnCgExport'),
+      btnAddAll:    $c('btnCgAddAll'),
+      btnClear:     $c('btnCgClear'),
     };
   }
 
-  /* ── Yardımcı ─────────────────────────────────────────────── */
+  /* ── Yardımcı ───────────────────────────────────────────── */
   function getLabel(idx) {
     if (cfg.labelStyle === 'upper') return String.fromCharCode(65 + idx);
     if (cfg.labelStyle === 'lower') return String.fromCharCode(97 + idx);
@@ -79,41 +84,34 @@ const Collage = (() => {
     return '';
   }
 
-  // Önizleme hücre boyutu (piksel)
+  // Önizleme hücre boyutu
   function cellSize() {
     const aw = Math.max(320, (dom.gridWrap?.clientWidth || 720) - 4);
     const w  = Math.max(MIN_CELL_PX,
       Math.floor((aw - cfg.gapH * (cfg.cols - 1)) / cfg.cols));
-    const h  = Math.round(w * cfg.exportH / cfg.exportW);
+    const h  = Math.round(w * cfg.panelAspectH / cfg.panelAspectW);
     return { w, h };
   }
 
-  // Canvas'ı cw×ch hücreye sığdıran "fit-inside" ölçek
+  // canvas'ı cw×ch hücreye sığdıran ölçek
   function fitInside(canvas, cw, ch) {
     return Math.min(cw / canvas.width, ch / canvas.height);
   }
 
-  // Panel için her zaman taze ölçek ve offset hesapla
+  // Her zaman taze transform (önizleme boyutundan bağımsız)
   function panelTransform(panel, cw, ch) {
-    const fit = fitInside(panel.canvas, cw, ch);
-    const sc  = fit * panel.zoomFactor;
-    const offX = (cw - panel.canvas.width  * sc) / 2
-               + panel.panFracX * panel.canvas.width  * sc;
-    const offY = (ch - panel.canvas.height * sc) / 2
-               + panel.panFracY * panel.canvas.height * sc;
+    const sc  = fitInside(panel.canvas, cw, ch) * panel.zoomFactor;
+    const offX = (cw - panel.canvas.width  * sc) / 2 + panel.panFracX * panel.canvas.width  * sc;
+    const offY = (ch - panel.canvas.height * sc) / 2 + panel.panFracY * panel.canvas.height * sc;
     return { sc, offX, offY };
   }
 
   function labelPosCSS(pos) {
-    return {
-      tl: 'top:6px;left:6px',
-      tr: 'top:6px;right:6px',
-      bl: 'bottom:6px;left:6px',
-      br: 'bottom:6px;right:6px',
-    }[pos] || 'top:6px;left:6px';
+    return { tl: 'top:6px;left:6px', tr: 'top:6px;right:6px',
+             bl: 'bottom:6px;left:6px', br: 'bottom:6px;right:6px' }[pos] || 'top:6px;left:6px';
   }
 
-  /* ── Izgara oluşturma ─────────────────────────────────────── */
+  /* ── Izgara ─────────────────────────────────────────────── */
   function renderGrid() {
     if (!dom.grid) return;
     const { w, h } = cellSize();
@@ -127,8 +125,8 @@ const Collage = (() => {
       `background:${cfg.bg === 'transparent' ? '#2a2a2a' : cfg.bg}`,
       'padding:0;box-sizing:content-box',
     ].join(';');
-    const n = cfg.rows * cfg.cols;
-    for (let i = 0; i < n; i++) buildCell(i, w, h);
+    for (let i = 0; i < cfg.rows * cfg.cols; i++) buildCell(i, w, h);
+    updateExportHInfo();
   }
 
   function buildCell(idx, w, h) {
@@ -150,46 +148,55 @@ const Collage = (() => {
       img.src = panel.previewSrc ||
         (panel.previewSrc = panel.canvas.toDataURL('image/jpeg', 0.72));
       img.style.cssText = 'position:absolute;transform-origin:0 0;'
-        + 'user-select:none;-webkit-user-select:none;pointer-events:none;';
+        + 'user-select:none;-webkit-user-select:none;pointer-events:none;width:auto;height:auto;';
 
       const { sc, offX, offY } = panelTransform(panel, w, h);
       img.style.transform = `translate(${offX}px,${offY}px) scale(${sc})`;
       div.appendChild(img);
 
       div.addEventListener('mousedown', e => startPan(e, idx, img, w, h));
-      div.addEventListener('wheel', e => {
-        e.preventDefault();
-        handleZoom(e, idx, img, w, h);
-      }, { passive: false });
+      div.addEventListener('wheel', e => { e.preventDefault(); handleZoom(e, idx, img, w, h); },
+        { passive: false });
 
-      // Etiket
+      // ── Etiket (D: görüntü boyutunu etkilemez; pxFont hücre genişliğine göre) ──
       const ltext = getLabel(idx);
       if (ltext) {
-        const pxFont = Math.max(8, Math.round(cfg.labelSize * w / Math.max(1, cfg.exportW)));
-        const lb = document.createElement('div');
-        lb.className = 'cg-label';
-        lb.textContent = ltext;
+        // Önizleme font boyutu: hücre genişliğinin ~%7'si (exportW'den bağımsız)
+        const pxFont = Math.max(8, Math.round(w * 0.07));
+
+        // CSS kontur yaklaşımı (text-shadow)
+        let strokeCSS = '';
+        if (cfg.strokeEnable) {
+          const sw = Math.min(3, cfg.strokeWidth); // CSS'te max 3px
+          const sc = cfg.strokeColor;
+          strokeCSS = `text-shadow:-${sw}px -${sw}px 0 ${sc},${sw}px -${sw}px 0 ${sc},`
+                    + `-${sw}px ${sw}px 0 ${sc},${sw}px ${sw}px 0 ${sc};`;
+        }
+
         const shadow = cfg.labelBg
           ? 'background:rgba(0,0,0,0.45);padding:1px 5px;border-radius:3px;'
-          : 'text-shadow:0 0 4px rgba(0,0,0,0.9),0 0 2px #000;';
-        lb.style.cssText = `position:absolute;z-index:6;font-size:${pxFont}px;font-weight:bold;`
-          + `color:${cfg.labelColor};${shadow}${labelPosCSS(cfg.lpos)};pointer-events:none;`;
+          : '';
+
+        const lb = document.createElement('div');
+        lb.textContent = ltext;
+        lb.style.cssText = `position:absolute;z-index:6;`
+          + `font-size:${pxFont}px;font-weight:bold;`
+          + `font-family:${cfg.labelFont};`
+          + `color:${cfg.labelColor};`
+          + shadow + strokeCSS
+          + `${labelPosCSS(cfg.lpos)};pointer-events:none;line-height:1.2;`;
         div.appendChild(lb);
       }
 
       const handle = document.createElement('div');
-      handle.className   = 'cg-handle';
-      handle.draggable   = true;
-      handle.title       = 'Sürükle (yer değiştir)';
-      handle.textContent = '⠿';
+      handle.className = 'cg-handle'; handle.draggable = true;
+      handle.title = 'Sürükle (yer değiştir)'; handle.textContent = '⠿';
       handle.addEventListener('mousedown', e => e.stopPropagation());
       handle.addEventListener('dragstart', e => onHandleDragStart(e, idx));
       div.appendChild(handle);
 
       const del = document.createElement('button');
-      del.className   = 'cg-del';
-      del.title       = 'Paneli kaldır';
-      del.textContent = '×';
+      del.className = 'cg-del'; del.title = 'Paneli kaldır'; del.textContent = '×';
       del.addEventListener('mousedown', e => e.stopPropagation());
       del.addEventListener('click', () => { panels[idx] = null; renderGrid(); });
       div.appendChild(del);
@@ -205,16 +212,18 @@ const Collage = (() => {
     dom.grid.appendChild(div);
   }
 
-  /* ── Pan ──────────────────────────────────────────────────── */
+  function updateExportHInfo() {
+    if (!dom.exportHInfo) return;
+    const h = Math.round(cfg.exportW * cfg.panelAspectH / cfg.panelAspectW);
+    dom.exportHInfo.textContent = h + ' px (oran ' + cfg.panelAspectW + ':' + cfg.panelAspectH + ')';
+  }
+
+  /* ── Pan ────────────────────────────────────────────────── */
   function startPan(e, idx, img, cw, ch) {
     if (e.button !== 0) return;
     const p = panels[idx];
-    panOp = {
-      idx, img, cw, ch,
-      startPanFracX: p.panFracX,
-      startPanFracY: p.panFracY,
-      sx: e.clientX, sy: e.clientY,
-    };
+    panOp = { idx, img, cw, ch,
+      startX: p.panFracX, startY: p.panFracY, sx: e.clientX, sy: e.clientY };
     document.addEventListener('mousemove', onPanMove);
     document.addEventListener('mouseup',   onPanUp);
     e.preventDefault();
@@ -222,12 +231,10 @@ const Collage = (() => {
 
   function onPanMove(e) {
     if (!panOp) return;
-    const p  = panels[panOp.idx];
+    const p = panels[panOp.idx];
     const { sc } = panelTransform(p, panOp.cw, panOp.ch);
-    const dx = (e.clientX - panOp.sx) / (p.canvas.width  * sc);
-    const dy = (e.clientY - panOp.sy) / (p.canvas.height * sc);
-    p.panFracX = panOp.startPanFracX + dx;
-    p.panFracY = panOp.startPanFracY + dy;
+    p.panFracX = panOp.startX + (e.clientX - panOp.sx) / (p.canvas.width  * sc);
+    p.panFracY = panOp.startY + (e.clientY - panOp.sy) / (p.canvas.height * sc);
     const { offX, offY } = panelTransform(p, panOp.cw, panOp.ch);
     panOp.img.style.transform = `translate(${offX}px,${offY}px) scale(${sc})`;
   }
@@ -238,34 +245,25 @@ const Collage = (() => {
     document.removeEventListener('mouseup',   onPanUp);
   }
 
-  /* ── Zoom ─────────────────────────────────────────────────── */
+  /* ── Zoom ───────────────────────────────────────────────── */
   function handleZoom(e, idx, img, cw, ch) {
-    const p     = panels[idx];
-    const rect  = img.closest('.cg-cell').getBoundingClientRect();
-    const mx    = e.clientX - rect.left;
-    const my    = e.clientY - rect.top;
-    const delta = e.deltaY < 0 ? 1.13 : 1 / 1.13;
+    const p    = panels[idx];
+    const rect = img.closest('.cg-cell').getBoundingClientRect();
+    const mx   = e.clientX - rect.left, my = e.clientY - rect.top;
+    const d    = e.deltaY < 0 ? 1.13 : 1 / 1.13;
 
-    const { sc: oldSc, offX: oldOffX, offY: oldOffY } = panelTransform(p, cw, ch);
-    const newZoom = Math.max(0.05, Math.min(20, p.zoomFactor * delta));
-    p.zoomFactor  = newZoom;
-
-    // Odak noktasını koru: zoom öncesi ve sonrası fare altındaki canvas pikseli aynı kalsın
-    const newSc   = fitInside(p.canvas, cw, ch) * newZoom;
-    const ratioSc = newSc / oldSc;
-    // Yeni offX = mx - ratioSc*(mx - oldOffX), fraca çevir
-    const newOffX = mx - ratioSc * (mx - oldOffX);
-    const newOffY = my - ratioSc * (my - oldOffY);
-    // panFrac geri hesapla
-    const centX = (cw - p.canvas.width  * newSc) / 2;
-    const centY = (ch - p.canvas.height * newSc) / 2;
-    p.panFracX = (newOffX - centX) / (p.canvas.width  * newSc);
-    p.panFracY = (newOffY - centY) / (p.canvas.height * newSc);
-
-    img.style.transform = `translate(${newOffX}px,${newOffY}px) scale(${newSc})`;
+    const { sc: oldSc, offX: oldOX, offY: oldOY } = panelTransform(p, cw, ch);
+    p.zoomFactor = Math.max(0.05, Math.min(20, p.zoomFactor * d));
+    const newSc  = fitInside(p.canvas, cw, ch) * p.zoomFactor;
+    const ratio  = newSc / oldSc;
+    const nOX    = mx - ratio * (mx - oldOX);
+    const nOY    = my - ratio * (my - oldOY);
+    p.panFracX = (nOX - (cw - p.canvas.width  * newSc) / 2) / (p.canvas.width  * newSc);
+    p.panFracY = (nOY - (ch - p.canvas.height * newSc) / 2) / (p.canvas.height * newSc);
+    img.style.transform = `translate(${nOX}px,${nOY}px) scale(${newSc})`;
   }
 
-  /* ── Sırala (drag-to-reorder) ────────────────────────────── */
+  /* ── Sıralama ───────────────────────────────────────────── */
   function onHandleDragStart(e, idx) {
     dragSrcIdx = idx;
     e.dataTransfer.effectAllowed = 'move';
@@ -274,38 +272,33 @@ const Collage = (() => {
 
   function onCellDrop(e, tgtIdx) {
     e.preventDefault();
-    dom.grid?.querySelectorAll('.cg-drop-over').forEach(el =>
-      el.classList.remove('cg-drop-over'));
+    dom.grid?.querySelectorAll('.cg-drop-over').forEach(el => el.classList.remove('cg-drop-over'));
     if (dragSrcIdx === null || dragSrcIdx === tgtIdx) { dragSrcIdx = null; return; }
-    const tmp = panels[dragSrcIdx];
-    panels[dragSrcIdx] = panels[tgtIdx];
-    panels[tgtIdx]     = tmp;
+    [panels[dragSrcIdx], panels[tgtIdx]] = [panels[tgtIdx], panels[dragSrcIdx]];
     dragSrcIdx = null;
     renderGrid();
   }
 
-  /* ── Dosya yükleme ────────────────────────────────────────── */
+  /* ── Dosya yükleme ──────────────────────────────────────── */
   async function loadCanvasFromFile(file) {
     return new Promise((resolve, reject) => {
       const ext = file.name.split('.').pop().toLowerCase();
-      if (['tif', 'tiff'].includes(ext)) {
-        const reader = new FileReader();
-        reader.onload = ev => {
+      if (['tif','tiff'].includes(ext)) {
+        const r = new FileReader();
+        r.onload = ev => {
           try {
-            const buf  = ev.target.result;
-            const ifds = UTIF.decode(buf);
+            const buf = ev.target.result, ifds = UTIF.decode(buf);
             UTIF.decodeImage(buf, ifds[0]);
             const rgba = UTIF.toRGBA8(ifds[0]);
-            const w = ifds[0].width, h = ifds[0].height;
             const c = document.createElement('canvas');
-            c.width = w; c.height = h;
+            c.width = ifds[0].width; c.height = ifds[0].height;
             c.getContext('2d').putImageData(
-              new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+              new ImageData(new Uint8ClampedArray(rgba), c.width, c.height), 0, 0);
             resolve(c);
           } catch (err) { reject(err); }
         };
-        reader.onerror = reject;
-        reader.readAsArrayBuffer(file);
+        r.onerror = reject;
+        r.readAsArrayBuffer(file);
       } else {
         const url = URL.createObjectURL(file);
         const img = new Image();
@@ -328,85 +321,86 @@ const Collage = (() => {
 
   function pickFileForCell(idx) {
     const inp = document.createElement('input');
-    inp.type = 'file';
-    inp.accept = '.jpg,.jpeg,.png,.tif,.tiff';
+    inp.type = 'file'; inp.accept = '.jpg,.jpeg,.png,.tif,.tiff';
     inp.onchange = async () => {
       if (!inp.files[0]) return;
-      try {
-        panels[idx] = makePanel(await loadCanvasFromFile(inp.files[0]));
-        renderGrid();
-      } catch (e) { console.error('[collage] hücre yükleme hatası:', e); }
+      try { panels[idx] = makePanel(await loadCanvasFromFile(inp.files[0])); renderGrid(); }
+      catch (e) { console.error('[collage] hücre yükleme:', e); }
     };
     inp.click();
   }
 
-  /* ── Drop-zone ────────────────────────────────────────────── */
+  /* ── Drop-zone ──────────────────────────────────────────── */
   function bindDropZone() {
     const dz = dom.drop;
     if (!dz) return;
     dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('cg-dz-over'); });
     dz.addEventListener('dragleave', ()  => dz.classList.remove('cg-dz-over'));
     dz.addEventListener('drop', async e => {
-      e.preventDefault();
-      dz.classList.remove('cg-dz-over');
+      e.preventDefault(); dz.classList.remove('cg-dz-over');
       for (const f of [...e.dataTransfer.files].filter(f =>
-          /\.(jpg|jpeg|png|tif|tiff)$/i.test(f.name))) {
+          /\.(jpg|jpeg|png|tif|tiff)$/i.test(f.name)))
         try { panels.push(makePanel(await loadCanvasFromFile(f))); } catch (_) {}
-      }
       renderGrid();
     });
     dz.addEventListener('click', () => dom.fileInput?.click());
     if (dom.fileInput) {
       dom.fileInput.addEventListener('change', async e => {
-        for (const f of e.target.files) {
+        for (const f of e.target.files)
           try { panels.push(makePanel(await loadCanvasFromFile(f))); } catch (_) {}
-        }
-        renderGrid();
-        dom.fileInput.value = '';
+        renderGrid(); dom.fileInput.value = '';
       });
     }
   }
 
-  /* ── Editörden ekle ───────────────────────────────────────── */
+  /* ── Editörden ekle ─────────────────────────────────────── */
   function addFromEditor() {
     if (typeof state === 'undefined' || !state.files) return;
-    state.files.forEach(e => {
-      const c = e.resultCanvas || e.origCanvas;
-      if (c) panels.push(makePanel(c));
-    });
+    state.files.forEach(e => { const c = e.resultCanvas || e.origCanvas; if (c) panels.push(makePanel(c)); });
     renderGrid();
   }
 
   /* ── Kontrolleri oku ─────────────────────────────────────── */
   function readCfg() {
-    cfg.cols   = Math.max(1, parseInt(dom.cols?.value)   || 2);
-    cfg.rows   = Math.max(1, parseInt(dom.rows?.value)   || 2);
-    cfg.gapH   = Math.max(0, parseInt(dom.gapH?.value)   || 0);
-    cfg.gapV   = dom.lockGap?.checked
-      ? cfg.gapH
-      : Math.max(0, parseInt(dom.gapV?.value) || 0);
-    cfg.bg     = dom.bg?.value     || '#ffffff';
-    cfg.labelStyle = dom.lstyle?.value || 'upper';
-    cfg.lpos   = dom.lpos?.value   || 'tl';
-    cfg.lsize  = Math.max(8, parseInt(dom.lsize?.value)  || 64);
-    cfg.labelColor = dom.lcolor?.value || '#ffffff';
-    cfg.labelBg    = dom.lbg?.checked !== false;
-    cfg.aspect = dom.aspect?.value || '1:1';
-    cfg.exportW = Math.max(64, parseInt(dom.exportW?.value) || 1000);
+    cfg.cols    = Math.max(1, parseInt(dom.cols?.value)  || 2);
+    cfg.rows    = Math.max(1, parseInt(dom.rows?.value)  || 2);
+    cfg.gapH    = Math.max(0, parseInt(dom.gapH?.value)  || 0);
+    cfg.gapV    = dom.lockGap?.checked ? cfg.gapH : Math.max(0, parseInt(dom.gapV?.value) || 0);
+    cfg.bg      = dom.bg?.value || '#ffffff';
 
-    const preset = ASPECT_PRESETS[cfg.aspect];
+    // Panel oranı (C) — hücre şekli + export H hesabı
+    cfg.panelAspect = dom.panelAspect?.value || '1:1';
+    const preset = PANEL_ASPECT[cfg.panelAspect];
+    const isFree = !preset;
+    if (dom.panelSizeRow) dom.panelSizeRow.style.display = isFree ? '' : 'none';
     if (preset) {
-      cfg.exportH = Math.round(cfg.exportW * preset[1] / preset[0]);
-      if (dom.exportH) dom.exportH.value = cfg.exportH;
+      cfg.panelAspectW = preset[0];
+      cfg.panelAspectH = preset[1];
     } else {
-      cfg.exportH = Math.max(64, parseInt(dom.exportH?.value) || 1000);
+      cfg.panelAspectW = Math.max(1, parseInt(dom.panelW?.value) || 4);
+      cfg.panelAspectH = Math.max(1, parseInt(dom.panelH?.value) || 3);
     }
+
+    // Etiket (D+E) — labelSize export'ta kullanılır; önizleme pxFont'u bağımsız
+    cfg.labelStyle  = dom.lstyle?.value  || 'upper';
+    cfg.labelPos    = dom.lpos?.value    || 'tl';
+    cfg.labelSize   = Math.max(8, parseInt(dom.lsize?.value) || 64);   // D: sadece export
+    cfg.labelColor  = dom.lcolor?.value  || '#ffffff';
+    cfg.labelBg     = dom.lbg?.checked  !== false;
+    cfg.labelFont   = dom.lFont?.value   || 'Arial,Helvetica,sans-serif';
+    cfg.strokeEnable = dom.strokeEnable?.checked || false;
+    cfg.strokeColor  = dom.strokeColor?.value  || '#000000';
+    cfg.strokeWidth  = Math.max(1, parseInt(dom.strokeWidth?.value) || 3);
+
+    // Export
+    cfg.exportW = Math.max(64, parseInt(dom.exportW?.value) || 1000);
   }
 
-  /* ── Dışa aktarma ────────────────────────────────────────── */
+  /* ── Export ─────────────────────────────────────────────── */
   async function exportCollage() {
     readCfg();
-    const { cols, rows, gapH, gapV, bg, exportW: pw, exportH: ph } = cfg;
+    const { cols, rows, gapH, gapV, bg, exportW: pw } = cfg;
+    const ph = Math.round(pw * cfg.panelAspectH / cfg.panelAspectW); // per-panel H from aspect
 
     const totalW = cols * pw + (cols - 1) * gapH;
     const totalH = rows * ph + (rows - 1) * gapV;
@@ -425,33 +419,33 @@ const Collage = (() => {
         const panel = panels[idx];
         if (!panel?.canvas) continue;
 
-        const px = c * (pw + gapH);
-        const py = r * (ph + gapV);
-
+        const px = c * (pw + gapH), py = r * (ph + gapV);
         ctx.save();
-        ctx.beginPath();
-        ctx.rect(px, py, pw, ph);
-        ctx.clip();
+        ctx.beginPath(); ctx.rect(px, py, pw, ph); ctx.clip();
 
-        // Export ölçeğini doğrudan hesapla — önizleme ölçeğinden bağımsız
-        const { sc: expSc, offX: expOffX, offY: expOffY } = panelTransform(panel, pw, ph);
+        // Export ölçeği doğrudan hesaplanır (D: önizleme boyutundan bağımsız)
+        const { sc, offX, offY } = panelTransform(panel, pw, ph);
+        ctx.drawImage(panel.canvas, px + offX, py + offY,
+          panel.canvas.width * sc, panel.canvas.height * sc);
 
-        ctx.drawImage(panel.canvas,
-          px + expOffX, py + expOffY,
-          panel.canvas.width  * expSc,
-          panel.canvas.height * expSc);
-
-        // Etiket
+        // Etiket (E: font + kontur)
         const ltext = getLabel(idx);
         if (ltext) {
-          const lx  = px + (cfg.lpos.includes('r') ? pw - cfg.lsize - 14 : 14);
-          const ly  = py + (cfg.lpos.includes('b') ? ph - 10             : 14 + cfg.lsize);
-          ctx.font  = `bold ${cfg.lsize}px sans-serif`;
+          ctx.font = `bold ${cfg.labelSize}px ${cfg.labelFont}`;
+          const lx = px + (cfg.labelPos.includes('r') ? pw - cfg.labelSize - 14 : 14);
+          const ly = py + (cfg.labelPos.includes('b') ? ph - 10 : 14 + cfg.labelSize);
+
           if (cfg.labelBg) {
             const tw  = ctx.measureText(ltext).width;
-            const pad = Math.round(cfg.lsize * 0.15);
+            const pad = Math.round(cfg.labelSize * 0.15);
             ctx.fillStyle = 'rgba(0,0,0,0.45)';
-            ctx.fillRect(lx - pad, ly - cfg.lsize - pad / 2, tw + pad * 2, cfg.lsize + pad);
+            ctx.fillRect(lx - pad, ly - cfg.labelSize - pad / 2, tw + pad * 2, cfg.labelSize + pad);
+          }
+          if (cfg.strokeEnable) {
+            ctx.strokeStyle = cfg.strokeColor;
+            ctx.lineWidth   = cfg.strokeWidth;
+            ctx.lineJoin    = 'round';
+            ctx.strokeText(ltext, lx, ly);
           }
           ctx.fillStyle = cfg.labelColor;
           ctx.fillText(ltext, lx, ly);
@@ -467,8 +461,7 @@ const Collage = (() => {
     const blob = await new Promise(resolve => {
       if (fmt === 'tiff') {
         const id  = fig.getContext('2d').getImageData(0, 0, fig.width, fig.height);
-        const buf = UTIF.encodeImage(id.data, fig.width, fig.height);
-        resolve(new Blob([buf], { type: 'image/tiff' }));
+        resolve(new Blob([UTIF.encodeImage(id.data, fig.width, fig.height)], { type:'image/tiff' }));
       } else {
         fig.toBlob(resolve, 'image/' + fmt, qual / 100);
       }
@@ -480,50 +473,46 @@ const Collage = (() => {
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 
-  /* ── Olayları bağla ──────────────────────────────────────── */
+  /* ── Olayları bağla ─────────────────────────────────────── */
   function bindEvents() {
-    [dom.cols, dom.rows, dom.bg, dom.lstyle, dom.lpos,
-     dom.lsize, dom.lcolor, dom.lbg, dom.exportW].forEach(el => {
+    const rerender = () => { readCfg(); renderGrid(); };
+
+    // Izgara kontrolleri
+    [dom.cols, dom.rows, dom.bg, dom.panelAspect,
+     dom.panelW, dom.panelH].forEach(el => {
       if (!el) return;
-      el.addEventListener('change', () => { readCfg(); renderGrid(); });
-      el.addEventListener('input',  () => { readCfg(); renderGrid(); });
+      el.addEventListener('change', rerender);
+      el.addEventListener('input',  rerender);
     });
 
-    // Oran seçimi
-    if (dom.aspect) {
-      dom.aspect.addEventListener('change', () => {
-        const isFree = dom.aspect.value === 'free';
-        if (dom.exportHRow) dom.exportHRow.style.display = isFree ? '' : 'none';
-        readCfg(); renderGrid();
-      });
-    }
-    // exportH yalnızca "Serbest" modunda düzenlenebilir
-    if (dom.exportH) {
-      dom.exportH.addEventListener('change', () => { readCfg(); renderGrid(); });
-      dom.exportH.addEventListener('input',  () => { readCfg(); renderGrid(); });
-    }
-
     // Gap H / V / kilit
-    if (dom.gapH) {
-      dom.gapH.addEventListener('input', () => {
-        if (dom.lockGap?.checked && dom.gapV) dom.gapV.value = dom.gapH.value;
-        readCfg(); renderGrid();
-      });
-    }
-    if (dom.gapV) dom.gapV.addEventListener('input', () => { readCfg(); renderGrid(); });
-    if (dom.lockGap) {
-      dom.lockGap.addEventListener('change', () => {
-        if (dom.lockGap.checked && dom.gapV && dom.gapH) dom.gapV.value = dom.gapH.value;
-        readCfg(); renderGrid();
-      });
-    }
+    if (dom.gapH) dom.gapH.addEventListener('input', () => {
+      if (dom.lockGap?.checked && dom.gapV) dom.gapV.value = dom.gapH.value;
+      rerender();
+    });
+    if (dom.gapV)    dom.gapV.addEventListener('input',    rerender);
+    if (dom.lockGap) dom.lockGap.addEventListener('change', () => {
+      if (dom.lockGap.checked && dom.gapV && dom.gapH) dom.gapV.value = dom.gapH.value;
+      rerender();
+    });
 
-    if (dom.exportFmt) {
-      dom.exportFmt.addEventListener('change', () => {
-        if (dom.exportQRow)
-          dom.exportQRow.style.display = dom.exportFmt.value === 'jpeg' ? '' : 'none';
-      });
+    // Etiket kontrolleri (D: labelSize sadece renderGrid tetikler, image boyutunu etkilemez)
+    [dom.lstyle, dom.lpos, dom.lsize, dom.lcolor, dom.lbg,
+     dom.lFont, dom.strokeEnable, dom.strokeColor, dom.strokeWidth].forEach(el => {
+      if (!el) return;
+      el.addEventListener('change', rerender);
+      el.addEventListener('input',  rerender);
+    });
+
+    // Export
+    if (dom.exportW) {
+      dom.exportW.addEventListener('input',  rerender);
+      dom.exportW.addEventListener('change', rerender);
     }
+    if (dom.exportFmt) dom.exportFmt.addEventListener('change', () => {
+      if (dom.exportQRow)
+        dom.exportQRow.style.display = dom.exportFmt.value === 'jpeg' ? '' : 'none';
+    });
     if (dom.exportQ) {
       const qSpan = $c('vCgQ');
       dom.exportQ.addEventListener('input', () => { if (qSpan) qSpan.textContent = dom.exportQ.value; });
@@ -536,12 +525,12 @@ const Collage = (() => {
     bindDropZone();
   }
 
-  /* ── Sekme aktifleşince ──────────────────────────────────── */
+  /* ── Sekme aktifleşince ─────────────────────────────────── */
   function onTabActivated() {
     setTimeout(() => { readCfg(); renderGrid(); }, 30);
   }
 
-  /* ── İlk yükleme ─────────────────────────────────────────── */
+  /* ── İlk yükleme ────────────────────────────────────────── */
   function init() {
     initDom();
     bindEvents();

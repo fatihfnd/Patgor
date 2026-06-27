@@ -579,7 +579,7 @@ const Pipeline = (() => {
 
     if (contours.size() === 0) {
       contours.delete();
-      console.log('[pipeline] dairesel alan: kontur bulunamadı');
+      console.log('[pipeline] daire bulunamadı: kontur yok');
       return { valid: false };
     }
 
@@ -593,94 +593,104 @@ const Pipeline = (() => {
     if (areaFrac < 0.15) {
       for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
       contours.delete();
-      console.log('[pipeline] dairesel alan: alan çok küçük ('
-        + (areaFrac * 100).toFixed(1) + '%), atlandı');
+      console.log('[pipeline] daire bulunamadı: alan çok küçük ('
+        + (areaFrac * 100).toFixed(1) + '%)');
       return { valid: false };
     }
 
-    const rect = cv.boundingRect(contours.get(maxIdx));
+    // Momentlerle gerçek ağırlık merkezi — boundingRect merkezi yanlış olabilir
+    const M  = cv.moments(contours.get(maxIdx), false);
+    const cx = Math.round(M.m10 / M.m00);
+    const cy = Math.round(M.m01 / M.m00);
+
+    // Sınırlayıcı dikdörtgenin kısa kenarından yarıçap (en güvenli ölçüm)
+    const rect  = cv.boundingRect(contours.get(maxIdx));
+    const rRaw  = Math.round(Math.min(rect.width, rect.height) / 2);
+    // %7 içeri al: koyu kenar bandı ve halka tamamen dışarıda kalır
+    const r     = Math.round(rRaw * 0.93);
+
     for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
     contours.delete();
 
-    const cx = Math.round(rect.x + rect.width  / 2);
-    const cy = Math.round(rect.y + rect.height / 2);
-    // %6 içeri al: karanlık kenar bandı ve halka maskenin dışında kalır
-    const r  = Math.round(Math.min(rect.width, rect.height) / 2 * 0.94);
+    console.log('[pipeline] daire: cx=' + cx + '  cy=' + cy
+      + '  rRaw=' + rRaw + '  rEff=' + r
+      + '  img=' + src.cols + 'x' + src.rows);
 
-    console.log('[pipeline] daire bulundu: merkez=(' + cx + ',' + cy
-      + ')  r=' + r + '  (küçültülmüş)  alan=' + (areaFrac * 100).toFixed(1) + '%');
+    // ── Feathered beyaz dolgu (245) ─────────────────────────────
+    const FILL = 245;
 
-    // Yumuşatılmış (feathered) maske: sert keskin kenar kalmaz
-    // Adım 1 — tam dolu maske
+    // Hard circle mask → Gaussian blur → soft alpha
     const hardMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
     cv.circle(hardMask, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
-
-    // Adım 2 — hafif blur ile yumuşat (kenar ~featherPx piksellik geçiş)
-    const featherPx = Math.max(3, Math.round(r * 0.012));
-    const blurKs    = (featherPx * 2 + 1) | 1;   // tek sayı olmalı
-    const softMask  = new cv.Mat();
-    cv.GaussianBlur(hardMask, softMask,
-      new cv.Size(blurKs, blurKs), featherPx * 0.5);
+    const featherPx = Math.max(3, Math.round(r * 0.015));
+    const fk = (featherPx * 2 + 1) | 1;    // tek sayı zorunlu
+    const softMask = new cv.Mat();
+    cv.GaussianBlur(hardMask, softMask, new cv.Size(fk, fk), featherPx * 0.5);
     hardMask.delete();
 
-    // Adım 3 — dışarıyı düz beyaza (245) doldur, içi ile blend et
-    const fillVal = 245;
-    const result  = src.clone();
-    // cv.copyTo maskesi: softMask=0 olan yerler fill, diğerleri src kalır.
-    // Bunu piksel bazında uygulayacağız: result = fill * (1 - alpha) + src * alpha
-    // α = softMask / 255
-    const fill32 = new cv.Mat(src.rows, src.cols, cv.CV_32FC3,
-      new cv.Scalar(fillVal, fillVal, fillVal));
-    const src32  = new cv.Mat();
+    // result = src × (α/255) + fill × (1 − α/255)
+    const src32   = new cv.Mat();
     src.convertTo(src32, cv.CV_32FC3, 1, 0);
-
-    // alpha kanalı olarak softMask kullan
     const alpha32 = new cv.Mat();
     softMask.convertTo(alpha32, cv.CV_32F, 1 / 255);
     softMask.delete();
 
     const a3 = new cv.Mat();
-    const planes = new cv.MatVector();
-    planes.push_back(alpha32); planes.push_back(alpha32); planes.push_back(alpha32);
-    cv.merge(planes, a3);
-    planes.delete(); alpha32.delete();
+    const pv = new cv.MatVector();
+    pv.push_back(alpha32); pv.push_back(alpha32); pv.push_back(alpha32);
+    cv.merge(pv, a3);
+    pv.delete(); alpha32.delete();
 
-    // blended = src * alpha + fill * (1-alpha)
-    const one  = new cv.Mat(src.rows, src.cols, cv.CV_32FC3, new cv.Scalar(1, 1, 1));
-    const oma  = new cv.Mat();   // 1 - alpha
+    const fill32 = new cv.Mat(src.rows, src.cols, cv.CV_32FC3,
+      new cv.Scalar(FILL, FILL, FILL));
+    const one = new cv.Mat(src.rows, src.cols, cv.CV_32FC3, new cv.Scalar(1, 1, 1));
+    const oma = new cv.Mat();
     cv.subtract(one, a3, oma);
     one.delete();
 
-    const srcPart  = new cv.Mat();
-    const fillPart = new cv.Mat();
-    cv.multiply(src32,  a3,  srcPart);
-    cv.multiply(fill32, oma, fillPart);
-    const blended32 = new cv.Mat();
-    cv.add(srcPart, fillPart, blended32);
-    src32.delete(); fill32.delete(); a3.delete(); oma.delete();
-    srcPart.delete(); fillPart.delete();
+    const sp = new cv.Mat(), fp = new cv.Mat(), b32 = new cv.Mat();
+    cv.multiply(src32, a3, sp);
+    cv.multiply(fill32, oma, fp);
+    cv.add(sp, fp, b32);
+    src32.delete(); fill32.delete(); a3.delete(); oma.delete(); sp.delete(); fp.delete();
 
-    blended32.convertTo(result, cv.CV_8UC3, 1, 0);
-    blended32.delete();
+    const result = new cv.Mat();
+    b32.convertTo(result, cv.CV_8UC3, 1, 0);
+    b32.delete();
 
-    console.log('[pipeline] daire dışı beyaza (245) feathered blend uygulandı '
-      + '(feather=' + featherPx + 'px)');
+    console.log('[pipeline] dışı beyaz (245) feather ' + fk + 'px blend uygulandı');
     return { valid: true, result, cx, cy, r };
   }
 
-  // Tam kare (1:1) kırpma — dairenin sığdığı en küçük kare
+  // 2r × 2r kare kırpma — merkezi (cx,cy), sınır dışı → beyaz (245) doldur
   function cropToCircleBounds(src, cx, cy, r) {
-    const margin = Math.max(4, Math.round(r * 0.015));
-    const half   = r + margin;                          // kare kenar/2
-    const x = Math.max(0, cx - half);
-    const y = Math.max(0, cy - half);
-    const side = Math.min(
-      Math.min(src.cols - x, src.rows - y),
-      half * 2
-    );
-    const result = src.roi(new cv.Rect(x, y, side, side)).clone();
-    console.log('[pipeline] daire kırpıldı (kare): '
-      + src.cols + 'x' + src.rows + ' → ' + side + 'x' + side);
+    const side = r * 2;
+    const sx   = cx - r;
+    const sy   = cy - r;
+
+    // Sınır içi: basit ROI (zaten beyaz dolgulu)
+    const x1 = Math.max(0, sx), y1 = Math.max(0, sy);
+    const x2 = Math.min(src.cols, sx + side), y2 = Math.min(src.rows, sy + side);
+    const cw = x2 - x1, ch = y2 - y1;
+
+    let result;
+    if (cw === side && ch === side) {
+      result = src.roi(new cv.Rect(x1, y1, side, side)).clone();
+    } else {
+      // Sınır dışına taşıyor: beyaz zemine kopyala (kenar kare kalır)
+      result = new cv.Mat(side, side, src.type(), new cv.Scalar(245, 245, 245, 255));
+      if (cw > 0 && ch > 0) {
+        const srcRoi = src.roi(new cv.Rect(x1, y1, cw, ch));
+        const dstRoi = result.roi(new cv.Rect(x1 - sx, y1 - sy, cw, ch));
+        srcRoi.copyTo(dstRoi);
+        srcRoi.delete(); dstRoi.delete();
+      }
+    }
+
+    console.log('[pipeline] kare kırpma: '
+      + src.cols + 'x' + src.rows + ' → '
+      + result.cols + 'x' + result.rows
+      + (result.cols === result.rows ? ' ✓ kare' : ' ✗ KARE DEĞİL!'));
     return result;
   }
 
