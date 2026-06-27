@@ -185,8 +185,9 @@ const Collage = (() => {
           + `font-family:${cfg.labelFont};`
           + `color:${cfg.labelColor};`
           + shadow + strokeCSS
-          + `${labelPosCSS(cfg.lpos)};pointer-events:none;line-height:1.2;`;
+          + `${labelPosCSS(cfg.labelPos)};pointer-events:none;line-height:1.2;`;
         div.appendChild(lb);
+        console.log('[collage] panel ' + idx + ': 1 etiket, konum=' + cfg.labelPos + ', px=' + pxFont);
       }
 
       const handle = document.createElement('div');

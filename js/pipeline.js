@@ -114,9 +114,10 @@ const Pipeline = (() => {
   /* ── Adım 1: Flat-field / vinyetleme ────────────────────── */
   // Büyük kernel (kısa kenar × 0.25) → global ışık gradyanını tahmin eder,
   // lokal detayları korur → halo oluşmaz
-  function flatFieldCorrection(src, strength) {
+  function flatFieldCorrection(src, strength, circleMask8) {
     console.log('[pipeline] 1- flat-field strength=' + strength
-      + '  kernel=' + Math.round(Math.min(src.cols, src.rows) * TUNE.flatKernelFrac));
+      + '  kernel=' + Math.round(Math.min(src.cols, src.rows) * TUNE.flatKernelFrac)
+      + (circleMask8 ? ' [maske=daire]' : ''));
     if (strength === 0) return src.clone();
 
     const pre = centerEdgeBrightness(src);
@@ -134,7 +135,7 @@ const Pipeline = (() => {
     const blurF = new cv.Mat();
     cv.GaussianBlur(srcF, blurF, new cv.Size(k, k), 0);
 
-    const origMean = cv.mean(srcF);
+    const origMean = circleMask8 ? cv.mean(srcF, circleMask8) : cv.mean(srcF);
     const mb = (origMean[0] + origMean[1] + origMean[2]) / 3 || 128;
 
     const corrF = new cv.Mat();
@@ -167,16 +168,28 @@ const Pipeline = (() => {
   // Gray World H&E için yanlış (renkleri siler).
   // Bunun yerine: en parlak pikseller = boş lam camı = gerçek beyaz.
   // Hedef: wbTarget (~245) — 255'e yakılmaz, highlight clipping önlenir.
-  function whiteBalance(src) {
-    console.log('[pipeline] 2- beyaz dengesi (hedef=' + TUNE.wbTarget + ')');
+  function whiteBalance(src, circleMask8) {
+    console.log('[pipeline] 2- beyaz dengesi (hedef=' + TUNE.wbTarget + ')'
+      + (circleMask8 ? ' [maske=daire]' : ''));
 
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_BGR2GRAY);
-    const mmRes = cv.minMaxLoc(gray);
+    // Parlak piksel maksimumunu yalnızca daire içinden al (varsa)
+    const mmRes = circleMask8 ? cv.minMaxLoc(gray, circleMask8) : cv.minMaxLoc(gray);
     const thr   = Math.max(180, mmRes.maxVal * 0.85);
-    const mask  = new cv.Mat();
-    cv.threshold(gray, mask, thr, 255, cv.THRESH_BINARY);
+    const brightMask = new cv.Mat();
+    cv.threshold(gray, brightMask, thr, 255, cv.THRESH_BINARY);
     gray.delete();
+
+    // Parlak pikseller ∩ daire içi
+    let mask;
+    if (circleMask8) {
+      mask = new cv.Mat();
+      cv.bitwise_and(brightMask, circleMask8, mask);
+      brightMask.delete();
+    } else {
+      mask = brightMask;
+    }
 
     const inChs = new cv.MatVector();
     cv.split(src, inChs);
@@ -335,9 +348,10 @@ const Pipeline = (() => {
     console.log('[pipeline] preset: ' + name);
   }
 
-  function chStats(ch32f) {
+  function chStats(ch32f, mask8) {
     const mMat = new cv.Mat(), sMat = new cv.Mat();
-    cv.meanStdDev(ch32f, mMat, sMat);
+    if (mask8) { cv.meanStdDev(ch32f, mMat, sMat, mask8); }
+    else        { cv.meanStdDev(ch32f, mMat, sMat); }
     const m = mMat.data64F[0];
     const s = sMat.data64F[0] || 1;
     mMat.delete(); sMat.delete();
@@ -386,9 +400,10 @@ const Pipeline = (() => {
   }
 
   // normBlend: normalize ile orijinali karıştır → eozin aşırı doygunlaşmaz
-  function reinhardNormalize(src, hemaScale, eosinScale) {
+  function reinhardNormalize(src, hemaScale, eosinScale, circleMask8) {
     console.log('[pipeline] 4- normalizasyon  hema=' + hemaScale
-      + ' eosin=' + eosinScale + ' blend=' + TUNE.normBlend);
+      + ' eosin=' + eosinScale + ' blend=' + TUNE.normBlend
+      + (circleMask8 ? ' [maske=daire]' : ''));
     const ref = customRefStats || PRESETS[activePreset];
 
     const lab32 = bgrToLabF(src);
@@ -401,7 +416,7 @@ const Pipeline = (() => {
 
     for (let i = 0; i < 3; i++) {
       const ch = chs.get(i);
-      const { mean: sM, std: sS } = chStats(ch);
+      const { mean: sM, std: sS } = chStats(ch, circleMask8);
       const rM = ref['mean' + names[i]];
       const rS = ref['std'  + names[i]] || 1;
       const sc = (rS / sS) * userScales[i];
@@ -554,10 +569,10 @@ const Pipeline = (() => {
     return result;
   }
 
-  /* ── Dairesel görüş alanı tespiti + doldurma ─────────────── */
-  // Telefon/oküler çekimlerinde daire dışı siyah alan istatistikleri bozar.
-  // Daire kadrajdan taşmış / kaymış olsa bile çalışır: görünür parçadan tespit yapılır.
-  function detectAndFillCircularFOV(src) {
+  /* ── Dairesel görüş alanı tespiti ───────────────────────── */
+  // Sadece daire tespiti yapar — beyaz dolgu VE kırpma pipeline'ın EN SONUNDA
+  // yapılır; böylece istatistikler yalnızca daire içi piksellerden hesaplanır.
+  function detectCircleOnly(src) {
     // 1. Gri + hafif blur → Otsu otomatik eşikleme
     //    Sabit eşik (28) yerine Otsu: halo ışık parlaklığına göre uyarlanır.
     const gray = new cv.Mat();
@@ -631,8 +646,18 @@ const Pipeline = (() => {
       + ' maskAlan=' + (areaFrac * 100).toFixed(1) + '%'
       + ' img=' + src.cols + 'x' + src.rows);
 
-    // 6. Feathered beyaz dolgu (245) — daire dışı nötr beyaz
-    const FILL = 245;
+    // Daire maskesi (255=içi, 0=dışı) — beyaz dolgu pipeline'ın EN SONUNDA yapılacak;
+    // bu sayede istatistikler (WB/flatfield/norm) yapay beyaz piksel içermez.
+    const mask8 = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
+    cv.circle(mask8, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
+    console.log('[pipeline] tespit OK (dolgu sona ertelendi). Kare: ' + (r * 2) + 'x' + (r * 2));
+    return { valid: true, cx, cy, r, mask8 };
+  }
+
+  /* ── Daire dışını beyaza boya (feathered, ~248) ──────────── */
+  // Yalnızca pipeline'ın SON adımında çağrılır; tüm renk düzeltmeleri tamamlandıktan sonra.
+  function fillCircleExterior(src, cx, cy, r) {
+    const FILL = 248;
     const hardMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
     cv.circle(hardMask, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
     const featherPx = Math.max(3, Math.round(r * 0.015));
@@ -669,9 +694,8 @@ const Pipeline = (() => {
     const result = new cv.Mat();
     b32.convertTo(result, cv.CV_8UC3, 1, 0);
     b32.delete();
-
-    console.log('[pipeline] dışı beyaz feather ' + fk + 'px. Kare çıktı: ' + (r*2) + 'x' + (r*2));
-    return { valid: true, result, cx, cy, r };
+    console.log('[pipeline] dışı beyaz feather ' + fk + 'px (hedef=' + FILL + ')');
+    return result;
   }
 
   // 2r × 2r kare kırpma — merkezi (cx,cy), sınır dışı → beyaz (245) doldur
@@ -781,18 +805,22 @@ const Pipeline = (() => {
       await yieldUI();
     };
 
-    // 0. Dairesel görüş alanı: dış siyah halkayı nötr değerle doldur
-    //    (flat-field ve WB istatistiklerini korumak için sona kırpılır)
-    let circleInfo = null;
+    // 0. Dairesel görüş alanı: yalnızca TESPIT — dolgu YOK.
+    //    Daire dışı pikseller istatistik hesaplarına (WB/flatfield/norm) karışmasın.
+    //    Beyaz dolgu + kırpma pipeline'ın EN SONUNDA yapılır.
+    let circleInfo  = null;
+    let circleMask8 = null;
     if (opts.cropBorder) {
       report(5, 'Dairesel alan tespit ediliyor…');
       await yieldUI();
       try {
-        const ci = detectAndFillCircularFOV(mat);
+        const ci = detectCircleOnly(mat);
         if (ci.valid) {
-          mat.delete();
-          mat = ci.result;
-          circleInfo = { cx: ci.cx, cy: ci.cy, r: ci.r };
+          circleInfo  = { cx: ci.cx, cy: ci.cy, r: ci.r };
+          circleMask8 = ci.mask8;
+          const mPre  = cv.mean(mat, circleMask8);
+          console.log('[pipeline] daire-içi renk ÖNCESİ BGR=('
+            + mPre[0].toFixed(1) + ',' + mPre[1].toFixed(1) + ',' + mPre[2].toFixed(1) + ')');
         }
       } catch (e) {
         console.warn('[pipeline] daire tespiti hatası:', e);
@@ -810,15 +838,15 @@ const Pipeline = (() => {
       await yieldUI();
     }
 
-    // 1. Flat-field
+    // 1. Flat-field — ortalama parlaklık yalnızca daire içinden hesaplanır
     if (opts.flatField) {
       await runStep('Işık eğimi düzeltiliyor…', 12,
-        m => flatFieldCorrection(m, opts.flatFieldStrength ?? TUNE.flatStrengthDef));
+        m => flatFieldCorrection(m, opts.flatFieldStrength ?? TUNE.flatStrengthDef, circleMask8));
     }
 
-    // 2. Beyaz dengesi
+    // 2. Beyaz dengesi — parlak piksel istatistiği yalnızca daire içinden
     if (opts.whiteBalance) {
-      await runStep('Beyaz dengesi ayarlanıyor…', 25, m => whiteBalance(m));
+      await runStep('Beyaz dengesi ayarlanıyor…', 25, m => whiteBalance(m, circleMask8));
     }
 
     // 2b. Highlight yumuşatma — WB sonrası zemin/parlak piksel clipping'i önle
@@ -850,10 +878,10 @@ const Pipeline = (() => {
       console.warn('[pipeline] arka plan maskesi oluşturulamadı:', e);
     }
 
-    // 3. Boya normalizasyonu — TUNE.normBlend ile karıştırılır
+    // 3. Boya normalizasyonu — Lab istatistiği yalnızca daire içinden
     if (opts.stainNorm) {
       await runStep('Boya normalizasyonu…', 45,
-        m => reinhardNormalize(m, opts.hemaScale ?? 100, opts.eosinScale ?? 100));
+        m => reinhardNormalize(m, opts.hemaScale ?? 100, opts.eosinScale ?? 100, circleMask8));
     }
 
     // 4. CLAHE — sadece L kanalında, hafifletilmiş (clipLimit 1.5)
@@ -924,16 +952,25 @@ const Pipeline = (() => {
     wbRef.delete();
     if (bgMask) bgMask.delete();
 
-    // Son: dairesel kırpma — tüm renk işlemleri SONRASI (koordinatlar hâlâ geçerli)
+    // Son: daire-içi renk logu → daire dışını beyazla (~248) → 2r×2r kare kırpma.
+    // Tüm renk/ışık düzeltmeleri TAMAMLANDIKTAN SONRA yapılır; istatistikler temizdir.
     if (circleInfo) {
       try {
+        if (circleMask8) {
+          const mPost = cv.mean(mat, circleMask8);
+          console.log('[pipeline] daire-içi renk SONRASI BGR=('
+            + mPost[0].toFixed(1) + ',' + mPost[1].toFixed(1) + ',' + mPost[2].toFixed(1) + ')');
+          circleMask8.delete(); circleMask8 = null;
+        }
+        const filled = fillCircleExterior(mat, circleInfo.cx, circleInfo.cy, circleInfo.r);
+        mat.delete(); mat = filled;
         const cropped = cropToCircleBounds(mat, circleInfo.cx, circleInfo.cy, circleInfo.r);
-        mat.delete();
-        mat = cropped;
+        mat.delete(); mat = cropped;
       } catch (e) {
-        console.warn('[pipeline] daire kırpma hatası:', e);
+        console.warn('[pipeline] daire doldurma/kırpma hatası:', e);
       }
     }
+    if (circleMask8) { circleMask8.delete(); }
 
     report(98, 'Sonuç hazırlanıyor…');
     await yieldUI();
