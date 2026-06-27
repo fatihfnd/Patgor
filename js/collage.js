@@ -158,11 +158,12 @@ const Collage = (() => {
       div.addEventListener('wheel', e => { e.preventDefault(); handleZoom(e, idx, img, w, h); },
         { passive: false });
 
-      // ── Etiket (D: görüntü boyutunu etkilemez; pxFont hücre genişliğine göre) ──
+      // ── Etiket (position:absolute — layout'u itmez) ──
       const ltext = getLabel(idx);
       if (ltext) {
-        // Önizleme font boyutu: hücre genişliğinin ~%7'si (exportW'den bağımsız)
-        const pxFont = Math.max(8, Math.round(w * 0.07));
+        // Önizleme font: cfg.labelSize'ı hücre/export oranıyla ölçekle
+        // Böylece "Boyut" kaydırıcısı önizlemede de anında görünür, imge etkilenmez.
+        const pxFont = Math.max(8, Math.round(cfg.labelSize * (w / Math.max(64, cfg.exportW))));
 
         // CSS kontur yaklaşımı (text-shadow)
         let strokeCSS = '';

@@ -3,21 +3,24 @@
    ============================================================ */
 
 :root {
-  --bg-app:      #0f1117;
-  --bg-panel:    #161b27;
-  --bg-section:  #1c2233;
-  --bg-hover:    #232c42;
-  --border:      #2a3550;
-  --accent:      #4f8ef7;
-  --accent-dark: #3a6fd8;
-  --success:     #3ecf6b;
+  --bg-app:      #111318;
+  --bg-panel:    #171c28;
+  --bg-section:  rgba(255,255,255,0.035);
+  --bg-hover:    rgba(255,255,255,0.06);
+  --border:      rgba(255,255,255,0.09);
+  --border-solid:#252e44;
+  --accent:      #26c6da;     /* camgöbeği — buton, aktif sekme, seçili kontrol */
+  --accent-dark: #0097a7;
+  --accent-glow: rgba(38,198,218,0.15);
+  --success:     #4caf82;
   --warning:     #f5a623;
-  --danger:      #e05252;
-  --text:        #d8e0f0;
-  --text-dim:    #7a8db0;
-  --text-label:  #a0b0d0;
-  --radius:      8px;
-  --radius-sm:   4px;
+  --danger:      #ef5350;
+  --text:        #dde5f2;
+  --text-dim:    #6a7d9c;
+  --text-label:  #9aabcc;
+  --canvas-bg:   #1a1d23;    /* görüntü alanı: renk yargısını etkilememek için nötr */
+  --radius:      10px;
+  --radius-sm:   6px;
   --panel-w:     270px;
   --header-h:    52px;
   --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
@@ -40,7 +43,9 @@ html, body {
 /* ── Header ────────────────────────────────────────────── */
 .app-header {
   height: var(--header-h);
-  background: var(--bg-panel);
+  background: rgba(17,19,24,0.92);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -57,7 +62,7 @@ html, body {
   gap: 10px;
 }
 .logo-icon { font-size: 22px; }
-.header-logo h1 { font-size: 16px; font-weight: 700; letter-spacing: .5px; }
+.header-logo h1 { font-size: 16px; font-weight: 700; letter-spacing: .5px; color: var(--accent); }
 .logo-sub { color: var(--text-dim); font-size: 11px; }
 
 .header-status {
@@ -93,7 +98,7 @@ html, body {
   transition: color .15s, border-color .15s;
 }
 .app-tab:hover  { color: var(--text); }
-.app-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.app-tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
 /* ── Layout ─────────────────────────────────────────────── */
 .tab-content { display: contents; }
@@ -114,7 +119,9 @@ html, body {
 .cg-panel {
   width: var(--panel-w);
   min-width: var(--panel-w);
-  background: var(--bg-panel);
+  background: rgba(17,21,32,0.97);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-right: 1px solid var(--border);
   overflow-y: auto;
   overflow-x: hidden;
@@ -203,7 +210,9 @@ html, body {
 .panel {
   width: var(--panel-w);
   min-width: var(--panel-w);
-  background: var(--bg-panel);
+  background: rgba(17,21,32,0.97);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-right: 1px solid var(--border);
   overflow-y: auto;
   overflow-x: hidden;
@@ -224,13 +233,14 @@ html, body {
 
 /* ── Sections ────────────────────────────────────────────── */
 .ctrl-section {
-  background: var(--bg-section);
-  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.07);
   border-radius: var(--radius);
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.25);
 }
 
 .section-title {
@@ -259,7 +269,7 @@ html, body {
 }
 .drop-zone:hover, .drop-zone.drag-over {
   border-color: var(--accent);
-  background: rgba(79,142,247,.06);
+  background: var(--accent-glow);
 }
 .drop-icon { font-size: 28px; }
 .drop-zone p { color: var(--text-dim); line-height: 1.5; }
@@ -332,7 +342,7 @@ html, body {
   color: var(--text-dim);
 }
 .radio-btn:hover { background: var(--bg-hover); }
-.radio-btn.active { background: rgba(79,142,247,.12); color: var(--text); }
+.radio-btn.active { background: var(--accent-glow); color: var(--accent); }
 .radio-btn input { accent-color: var(--accent); }
 
 /* ── Toggle Row ──────────────────────────────────────────── */
@@ -417,18 +427,18 @@ input[type=range]::-webkit-slider-thumb {
 }
 .btn:disabled { opacity: .4; cursor: not-allowed; }
 .btn-full { width: 100%; }
-.btn-primary { background: var(--accent); color: #fff; }
-.btn-primary:hover:not(:disabled) { background: var(--accent-dark); }
-.btn-secondary { background: #2a3a5e; color: var(--text); }
-.btn-secondary:hover:not(:disabled) { background: #364876; }
+.btn-primary { background: var(--accent); color: #001a1e; font-weight: 700; }
+.btn-primary:hover:not(:disabled) { background: var(--accent-dark); color: #fff; }
+.btn-secondary { background: rgba(38,198,218,0.12); color: var(--accent); border: 1px solid rgba(38,198,218,0.25); }
+.btn-secondary:hover:not(:disabled) { background: rgba(38,198,218,0.2); }
 .btn-outline {
   background: transparent;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255,255,255,0.13);
   color: var(--text-dim);
 }
-.btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .btn-ghost { background: transparent; color: var(--text-dim); }
-.btn-ghost:hover { color: var(--text); }
+.btn-ghost:hover { color: var(--text); background: var(--bg-hover); }
 .btn-icon {
   background: var(--bg-hover);
   border: 1px solid var(--border);
@@ -456,7 +466,7 @@ input[type=range]::-webkit-slider-thumb {
   cursor: pointer;
   font-size: 11px;
 }
-.btn-preset.active { border-color: var(--accent); color: var(--accent); }
+.btn-preset.active { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
 .btn-preset:hover { border-color: var(--accent); color: var(--text); }
 
 .preset-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
@@ -474,11 +484,11 @@ input[type=range]::-webkit-slider-thumb {
 }
 .ref-thumb-preview img { width: 100%; height: 80px; object-fit: cover; }
 
-/* ── Canvas area ─────────────────────────────────────────── */
+/* ── Canvas area — nötr koyu gri, renk yargısını etkilemez ── */
 .canvas-area {
   flex: 1;
   position: relative;
-  background: var(--bg-app);
+  background: var(--canvas-bg);
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -505,7 +515,9 @@ input[type=range]::-webkit-slider-thumb {
 
 .viewer-toolbar {
   height: 44px;
-  background: var(--bg-panel);
+  background: rgba(17,21,32,0.94);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
@@ -531,7 +543,7 @@ input[type=range]::-webkit-slider-thumb {
   font-size: 11px;
   font-weight: 600;
 }
-.view-btn.active { background: var(--accent); color: #fff; }
+.view-btn.active { background: var(--accent); color: #001a1e; font-weight: 700; }
 
 .zoom-controls {
   display: flex;

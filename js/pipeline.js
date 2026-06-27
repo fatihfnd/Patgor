@@ -31,6 +31,7 @@ const Pipeline = (() => {
     // Arka plan / doku maskesi (HSV değerleri, 0-255 ölçeği)
     bgSatMax:          35,     // doygunluk < bu → arka plan
     bgValMin:          195,    // parlaklık > bu → arka plan
+    bgWhiteTarget:     247,    // arka plan temizleme hedefi — lam camı renksizleştirme
     bgFeatherPx:       21,     // kenar yumuşatma yarıçapı (px, tek sayı)
     bgSmoothKernel:    9,      // arka plan temizleme kernel
 
@@ -554,24 +555,33 @@ const Pipeline = (() => {
   }
 
   /* ── Dairesel görüş alanı tespiti + doldurma ─────────────── */
-  // Telefon/oküler çekimlerinde daire dışı siyah alan istatistikleri bozar:
-  //   • flat-field: siyah bölge blurun düşmesine → bölme faktörü büyür → patlama
-  //   • WB/normalizasyon: siyah pikseller ortalamayı düşürür → aşırı telafi
-  // Çözüm: daireyi bul → dışını nötr gri ile doldur → normal boru hattı → sonda kırp.
+  // Telefon/oküler çekimlerinde daire dışı siyah alan istatistikleri bozar.
+  // Daire kadrajdan taşmış / kaymış olsa bile çalışır: görünür parçadan tespit yapılır.
   function detectAndFillCircularFOV(src) {
+    // 1. Gri + hafif blur → Otsu otomatik eşikleme
+    //    Sabit eşik (28) yerine Otsu: halo ışık parlaklığına göre uyarlanır.
     const gray = new cv.Mat();
     cv.cvtColor(src, gray, cv.COLOR_BGR2GRAY);
-
-    const thr = new cv.Mat();
-    cv.threshold(gray, thr, 28, 255, cv.THRESH_BINARY);
+    const gblur = new cv.Mat();
+    cv.GaussianBlur(gray, gblur, new cv.Size(5, 5), 1);
     gray.delete();
 
-    const ks = Math.max(21, (Math.round(Math.min(src.cols, src.rows) * 0.025) | 1));
-    const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ks, ks));
-    const closed = new cv.Mat();
-    cv.morphologyEx(thr, closed, cv.MORPH_CLOSE, kernel);
-    kernel.delete(); thr.delete();
+    const thr = new cv.Mat();
+    cv.threshold(gblur, thr, 0, 255, cv.THRESH_BINARY | cv.THRESH_OTSU);
+    gblur.delete();
 
+    // 2. Morfolojik açma + kapama
+    //    Açma: halo ışık huzmesi benekleri kaybolur.
+    //    Kapama: FOV içindeki küçük karanlık lekeler dolur.
+    const ks = Math.max(15, (Math.round(Math.min(src.cols, src.rows) * 0.02) | 1));
+    const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(ks, ks));
+    const opened = new cv.Mat();
+    const closed = new cv.Mat();
+    cv.morphologyEx(thr, opened, cv.MORPH_OPEN,  kernel);
+    cv.morphologyEx(opened, closed, cv.MORPH_CLOSE, kernel);
+    kernel.delete(); thr.delete(); opened.delete();
+
+    // 3. En büyük bağlı bileşen
     const contours  = new cv.MatVector();
     const hierarchy = new cv.Mat();
     cv.findContours(closed, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
@@ -579,7 +589,7 @@ const Pipeline = (() => {
 
     if (contours.size() === 0) {
       contours.delete();
-      console.log('[pipeline] daire bulunamadı: kontur yok');
+      console.log('[pipeline] daire güvenle bulunamadı: kontur yok — görüntü işleniyor');
       return { valid: false };
     }
 
@@ -593,42 +603,44 @@ const Pipeline = (() => {
     if (areaFrac < 0.15) {
       for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
       contours.delete();
-      console.log('[pipeline] daire bulunamadı: alan çok küçük ('
-        + (areaFrac * 100).toFixed(1) + '%)');
+      console.log('[pipeline] daire güvenle bulunamadı: maskAlan='
+        + (areaFrac * 100).toFixed(1) + '% (<15%) — görüntü olduğu gibi işleniyor');
       return { valid: false };
     }
 
-    // Momentlerle gerçek ağırlık merkezi — boundingRect merkezi yanlış olabilir
+    // 4. Merkez: momentlerden ağırlık merkezi
     const M  = cv.moments(contours.get(maxIdx), false);
     const cx = Math.round(M.m10 / M.m00);
     const cy = Math.round(M.m01 / M.m00);
 
-    // Sınırlayıcı dikdörtgenin kısa kenarından yarıçap (en güvenli ölçüm)
-    const rect  = cv.boundingRect(contours.get(maxIdx));
-    const rRaw  = Math.round(Math.min(rect.width, rect.height) / 2);
-    // %7 içeri al: koyu kenar bandı ve halka tamamen dışarıda kalır
-    const r     = Math.round(rRaw * 0.93);
+    // 5. Yarıçap: iki tahmin, KÜÇÜK olanı al — halo/kaymış kadraj şişirmesini önle
+    //    rBound = boundingRect kısa kenar / 2  (dış boyuta göre)
+    //    rArea  = alan eşdeğeri r = √(A/π)    (iç doluluk'a göre)
+    const rect   = cv.boundingRect(contours.get(maxIdx));
+    const rBound = Math.round(Math.min(rect.width, rect.height) / 2);
+    const rArea  = Math.round(Math.sqrt(maxArea / Math.PI));
 
     for (let i = 0; i < contours.size(); i++) contours.get(i).delete();
     contours.delete();
 
-    console.log('[pipeline] daire: cx=' + cx + '  cy=' + cy
-      + '  rRaw=' + rRaw + '  rEff=' + r
-      + '  img=' + src.cols + 'x' + src.rows);
+    const rRaw = Math.min(rBound, rArea);
+    const r    = Math.round(rRaw * 0.95);  // %5 içeri: koyu kenar bandı dışarıda
 
-    // ── Feathered beyaz dolgu (245) ─────────────────────────────
+    console.log('[pipeline] daire: cx=' + cx + ' cy=' + cy
+      + ' rBound=' + rBound + ' rArea=' + rArea + ' rEff=' + r
+      + ' maskAlan=' + (areaFrac * 100).toFixed(1) + '%'
+      + ' img=' + src.cols + 'x' + src.rows);
+
+    // 6. Feathered beyaz dolgu (245) — daire dışı nötr beyaz
     const FILL = 245;
-
-    // Hard circle mask → Gaussian blur → soft alpha
     const hardMask = new cv.Mat(src.rows, src.cols, cv.CV_8U, new cv.Scalar(0));
     cv.circle(hardMask, new cv.Point(cx, cy), r, new cv.Scalar(255), -1);
     const featherPx = Math.max(3, Math.round(r * 0.015));
-    const fk = (featherPx * 2 + 1) | 1;    // tek sayı zorunlu
+    const fk = (featherPx * 2 + 1) | 1;
     const softMask = new cv.Mat();
     cv.GaussianBlur(hardMask, softMask, new cv.Size(fk, fk), featherPx * 0.5);
     hardMask.delete();
 
-    // result = src × (α/255) + fill × (1 − α/255)
     const src32   = new cv.Mat();
     src.convertTo(src32, cv.CV_32FC3, 1, 0);
     const alpha32 = new cv.Mat();
@@ -658,7 +670,7 @@ const Pipeline = (() => {
     b32.convertTo(result, cv.CV_8UC3, 1, 0);
     b32.delete();
 
-    console.log('[pipeline] dışı beyaz (245) feather ' + fk + 'px blend uygulandı');
+    console.log('[pipeline] dışı beyaz feather ' + fk + 'px. Kare çıktı: ' + (r*2) + 'x' + (r*2));
     return { valid: true, result, cx, cy, r };
   }
 
@@ -861,18 +873,20 @@ const Pipeline = (() => {
     // 7. Arka plan koruması: CLAHE/sharpen'ın arka plandaki gürültüyü abartmasını önle.
     //    Doku: işlenmiş hali kullan. Arka plan: wbRef'in yumuşatılmış halini geri yükle.
     if (bgMask) {
-      report(85, 'Arka plan korunuyor…');
+      report(85, 'Arka plan beyazlandırılıyor…');
       await yieldUI();
       try {
-        const k          = TUNE.bgSmoothKernel | 1;
-        const bgSmoothed = new cv.Mat();
-        cv.GaussianBlur(wbRef, bgSmoothed, new cv.Size(k, k), 2);
-
-        const blended = blendWithMask(mat, bgSmoothed, bgMask);
-        bgSmoothed.delete();
+        // Zemin pikselleri düz temiz beyaza (247) çeker:
+        //   - Normal lam görüntüsünde hafif renkli/gri cam zemini silinir
+        //   - Telefon görüntüsünde daire-dışı dolgu zaten beyaz, maske orada güçlü
+        //   - Doku bölgelerine dokunmaz (bgMask ≈ 0 orada)
+        const bgWhite = new cv.Mat(mat.rows, mat.cols, cv.CV_8UC3,
+          new cv.Scalar(TUNE.bgWhiteTarget, TUNE.bgWhiteTarget, TUNE.bgWhiteTarget));
+        const blended = blendWithMask(mat, bgWhite, bgMask);
+        bgWhite.delete();
         mat.delete();
         mat = blended;
-        console.log('[pipeline] arka plan koruması uygulandı');
+        console.log('[pipeline] arka plan beyazlandı (hedef=' + TUNE.bgWhiteTarget + ')');
       } catch (e) {
         console.warn('[pipeline] arka plan karıştırma hatası:', e);
       }

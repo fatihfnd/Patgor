@@ -6,6 +6,7 @@
 const PROCESS_TIMEOUT_MS = 60_000;
 const MAX_PROCESS_PX     = 1500;
 const LIVE_PREVIEW_PX    = 320;   // canlı önizleme için küçük çalışma kopyası
+const UNDO_MAX           = 3;     // geri alma yığını derinliği
 
 /* ── Durum ───────────────────────────────────────────────── */
 const state = {
@@ -58,6 +59,7 @@ function initDom() {
     errorMsg:          $('errorMsg'),
     btnAutoProcess:    $('btnAutoProcess'),
     btnApplyManual:    $('btnApplyManual'),
+    btnUndo:           $('btnUndo'),
     btnBatchProcess:   $('btnBatchProcess'),
     btnClearAll:       $('btnClearAll'),
     btnRemoveRef:      $('btnRemoveRef'),
@@ -241,6 +243,36 @@ function removeImage(entry) {
   setStatus(state.files.length + ' görüntü', 'ok');
 }
 
+/* ── Geri alma (Undo) ────────────────────────────────────── */
+function pushHistory(entry) {
+  if (!entry.history) entry.history = [];
+  const src = entry.resultCanvas;
+  if (!src) return;
+  const snap = document.createElement('canvas');
+  snap.width = src.width; snap.height = src.height;
+  snap.getContext('2d').drawImage(src, 0, 0);
+  entry.history.push(snap);
+  if (entry.history.length > UNDO_MAX) entry.history.shift();
+  updateUndoButton();
+}
+
+function undo() {
+  if (state.activeIdx < 0) return;
+  const entry = state.files[state.activeIdx];
+  if (!entry?.history?.length) { setStatus('Geri alınacak işlem yok'); return; }
+  entry.resultCanvas = entry.history.pop();
+  drawToCanvas(entry.resultCanvas, dom.canvasAfter);
+  updateSliderCanvases();
+  setStatus('Geri alındı (' + entry.history.length + ' adım kaldı)', 'ok');
+  updateUndoButton();
+}
+
+function updateUndoButton() {
+  const entry     = state.activeIdx >= 0 ? state.files[state.activeIdx] : null;
+  const hasHist   = !!(entry?.history?.length);
+  if (dom.btnUndo) dom.btnUndo.disabled = !hasHist;
+}
+
 /* ── Tümünü temizle ──────────────────────────────────────── */
 function clearAllImages() {
   state.files.forEach(e => {
@@ -284,6 +316,7 @@ async function addFiles(files) {
         file, name: file.name,
         origCanvas: canvas, resultCanvas: null,
         processed: false, stainType: '—',
+        history: [],
       };
       state.files.push(entry);
       createThumb(canvas, entry);
@@ -310,6 +343,7 @@ function activateImage(idx) {
     t.classList.toggle('active', i === idx));
 
   const entry = state.files[idx];
+  updateUndoButton();
   dom.infoSize.textContent   = entry.origCanvas.width + ' × ' + entry.origCanvas.height + ' px';
   dom.infoFormat.textContent = entry.name.split('.').pop().toUpperCase();
   dom.infoStain.textContent  = entry.stainType;
@@ -447,8 +481,6 @@ async function processActive() {
   if (!state.openCVReady)  { showError('OpenCV henüz hazır değil, lütfen bekleyin.'); return; }
 
   const entry = state.files[state.activeIdx];
-  const origW = entry.origCanvas.width;
-  const origH = entry.origCanvas.height;
 
   hideError();
   showProcessing(true, 'Hazırlanıyor…');
@@ -456,6 +488,8 @@ async function processActive() {
   setProcessingButtons(false);
 
   try {
+    pushHistory(entry);   // işlemden önce geri alma geçmişine ekle
+
     const opts = getProcessingOpts();
     const { canvas: workCanvas, scale } = downscaleCanvas(entry.origCanvas, MAX_PROCESS_PX);
 
@@ -469,7 +503,11 @@ async function processActive() {
     smallResult.height = imgData.height;
     smallResult.getContext('2d').putImageData(imgData, 0, 0);
 
-    const result = scale < 1 ? upscaleCanvas(smallResult, origW, origH) : smallResult;
+    // imgData boyutunu scale ile böl: dairesel kırpma sonrası çıktı orijinalden
+    // farklı olabilir (2r×2r kare). origW/origH kullanmak kareyi ovale esneter.
+    const outW   = Math.round(imgData.width  / scale);
+    const outH   = Math.round(imgData.height / scale);
+    const result = scale < 1 ? upscaleCanvas(smallResult, outW, outH) : smallResult;
 
     entry.resultCanvas = result;
     entry.processed    = true;
@@ -514,6 +552,7 @@ async function applyManualOpts() {
   setProcessingButtons(false);
 
   try {
+    pushHistory(entry);   // manuel uygula öncesi geçmişe ekle
     const opts = {
       ...getProcessingOpts(),
       flatField: false, whiteBalance: false, stainNorm: false,
@@ -754,6 +793,15 @@ function bindEvents() {
 
   // "Uygula" — tam çözünürlükte manuel ayar
   dom.btnApplyManual.addEventListener('click', applyManualOpts);
+
+  // "Geri Al" + Ctrl+Z
+  if (dom.btnUndo) dom.btnUndo.addEventListener('click', undo);
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+    }
+  });
 
   // "Sıfırla" — kaydırıcıları varsayılana döndür, görüntüyü orijinal sonuca geri al
   $('btnResetManual').addEventListener('click', () => {

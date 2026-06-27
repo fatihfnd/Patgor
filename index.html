@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PaToGörüntü — Patoloji Görüntü Düzeltme</title>
+  <title>Patso — Patoloji Görüntü Düzeltme</title>
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
@@ -11,7 +11,7 @@
   <header class="app-header">
     <div class="header-logo">
       <span class="logo-icon">🔬</span>
-      <h1>PaToGörüntü</h1>
+      <h1>Patso</h1>
       <span class="logo-sub">Patoloji Görüntü Düzeltme</span>
     </div>
     <div class="header-status" id="statusBar">Hazır</div>
@@ -172,7 +172,12 @@
             <span class="slider-val" id="vFlatField">28</span>
           </div>
           <button class="btn btn-outline btn-full" id="btnApplyManual">Uygula</button>
-          <button class="btn btn-ghost btn-full" id="btnResetManual">Sıfırla</button>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-ghost btn-full" id="btnUndo" disabled
+              style="flex:1" title="Son işlemi geri al (Ctrl+Z)">↩ Geri Al</button>
+            <button class="btn btn-ghost btn-full" id="btnResetManual"
+              style="flex:1">⟳ Sıfırla</button>
+          </div>
         </div>
       </section>
 
@@ -321,10 +326,11 @@
       <section class="ctrl-section">
         <h2 class="section-title">Hakkında</h2>
         <p class="about-text">
+          <strong style="color:var(--accent)">Patso</strong> — Patoloji Görüntü Düzeltme<br/>
           Tüm işlem tarayıcınızda gerçekleşir.<br/>
           Görüntüler hiçbir sunucuya gönderilmez.
         </p>
-        <p class="about-text version">v0.1.0-iskelet</p>
+        <p class="about-text version">v0.2.0</p>
       </section>
 
     </aside>
