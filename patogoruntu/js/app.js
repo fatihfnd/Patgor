@@ -1,0 +1,988 @@
+/**
+ * app.js — Ana uygulama mantığı
+ */
+
+/* ── Sabitler ────────────────────────────────────────────── */
+const PROCESS_TIMEOUT_MS = 60_000;
+const MAX_PROCESS_PX     = 1500;
+const LIVE_PREVIEW_PX    = 320;   // canlı önizleme için küçük çalışma kopyası
+const UNDO_MAX           = 3;     // geri alma yığını derinliği
+
+/* ── Durum ───────────────────────────────────────────────── */
+const state = {
+  files:       [],
+  activeIdx:   -1,
+  viewMode:    'split',
+  zoom:        1.0,
+  openCVReady: false,
+  sliderX:     0.5,
+};
+
+/* ── Canlı önizleme durum ────────────────────────────────── */
+let _liveTimer   = null;
+let _livePending = false;
+let _liveNeeded  = false;
+
+/* ── DOM ─────────────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+let dom = {};
+
+function initDom() {
+  dom = {
+    dropZone:          $('dropZone'),
+    fileInput:         $('fileInput'),
+    refInput:          $('refInput'),
+    thumbBar:          $('thumbBar'),
+    canvasEmpty:       $('canvasEmpty'),
+    viewerWrap:        $('viewerWrap'),
+    splitView:         $('splitView'),
+    sliderView:        $('sliderView'),
+    canvasBefore:      $('canvasBefore'),
+    canvasAfter:       $('canvasAfter'),
+    canvasSliderBase:  $('canvasSliderBase'),
+    canvasSliderTop:   $('canvasSliderTop'),
+    sliderHandle:      $('sliderHandle'),
+    sliderOverlay:     $('sliderOverlay'),
+    processingOverlay: $('processingOverlay'),
+    processingMsg:     $('processingMsg'),
+    progressBar:       $('progressBar'),
+    statusBar:         $('statusBar'),
+    batchList:         $('batchList'),
+    infoSize:          $('infoSize'),
+    infoFormat:        $('infoFormat'),
+    infoStain:         $('infoStain'),
+    infoStatus:        $('infoStatus'),
+    zoomLabel:         $('zoomLabel'),
+    jpgQualityRow:     $('jpgQualityRow'),
+    refThumb:          $('refThumb'),
+    errorBox:          $('errorBox'),
+    errorMsg:          $('errorMsg'),
+    btnAutoProcess:    $('btnAutoProcess'),
+    btnApplyManual:    $('btnApplyManual'),
+    btnUndo:           $('btnUndo'),
+    btnBatchProcess:   $('btnBatchProcess'),
+    btnClearAll:       $('btnClearAll'),
+    btnRemoveRef:      $('btnRemoveRef'),
+  };
+}
+
+/* ── Hata kutusu ─────────────────────────────────────────── */
+function showError(msg) {
+  console.error('[PaToGörüntü] HATA:', msg);
+  if (!dom.errorBox) return;
+  dom.errorMsg.textContent = msg;
+  dom.errorBox.hidden = false;
+  clearTimeout(showError._timer);
+  showError._timer = setTimeout(() => { dom.errorBox.hidden = true; }, 10_000);
+}
+function hideError() { if (dom.errorBox) dom.errorBox.hidden = true; }
+
+/* ── Durum çubuğu ────────────────────────────────────────── */
+function setStatus(msg, type = '') {
+  if (!dom.statusBar) return;
+  dom.statusBar.textContent = msg;
+  dom.statusBar.style.color =
+    type === 'error' ? 'var(--danger)'  :
+    type === 'ok'    ? 'var(--success)' : 'var(--text-dim)';
+}
+
+/* ── İşleme butonları ────────────────────────────────────── */
+function setProcessingButtons(enabled) {
+  [dom.btnAutoProcess, dom.btnApplyManual, dom.btnBatchProcess].forEach(btn => {
+    if (btn) btn.disabled = !enabled;
+  });
+}
+
+/* ── Bilgi paneli sıfırla ────────────────────────────────── */
+function clearInfoPanel() {
+  dom.infoSize.textContent   = '—';
+  dom.infoFormat.textContent = '—';
+  dom.infoStain.textContent  = '—';
+  dom.infoStatus.textContent = '—';
+}
+
+/* ── OpenCV başlatma ─────────────────────────────────────── */
+function initOpenCV() {
+  setProcessingButtons(false);
+  setStatus('OpenCV yükleniyor…');
+  const onReady = () => {
+    state.openCVReady = true;
+    setProcessingButtons(true);
+    setStatus('Hazır — OpenCV yüklü', 'ok');
+    console.log('[app] OpenCV hazır');
+  };
+  if (window.openCVReady) { onReady(); }
+  else { window.addEventListener('opencv-ready', onReady, { once: true }); }
+}
+
+/* ── Görüntü yükleme ─────────────────────────────────────── */
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (['tif', 'tiff'].includes(ext)) {
+      const reader = new FileReader();
+      reader.onload = e => {
+        try {
+          const buf  = e.target.result;
+          const ifds = UTIF.decode(buf);
+          UTIF.decodeImage(buf, ifds[0]);
+          const rgba = UTIF.toRGBA8(ifds[0]);
+          const w = ifds[0].width, h = ifds[0].height;
+          const c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba), w, h), 0, 0);
+          resolve(c);
+        } catch (err) { reject(err); }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    } else {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+        resolve(c);
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Görüntü yüklenemedi')); };
+      img.src = url;
+    }
+  });
+}
+
+/* ── Canvas ölçekleme ────────────────────────────────────── */
+function downscaleCanvas(canvas, maxPx) {
+  const { width: w, height: h } = canvas;
+  if (Math.max(w, h) <= maxPx) return { canvas, scale: 1 };
+  const scale = maxPx / Math.max(w, h);
+  const sw = Math.round(w * scale), sh = Math.round(h * scale);
+  const c = document.createElement('canvas');
+  c.width = sw; c.height = sh;
+  c.getContext('2d').drawImage(canvas, 0, 0, sw, sh);
+  return { canvas: c, scale };
+}
+
+function upscaleCanvas(small, targetW, targetH) {
+  const c = document.createElement('canvas');
+  c.width = targetW; c.height = targetH;
+  const ctx = c.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(small, 0, 0, targetW, targetH);
+  return c;
+}
+
+/* ── Thumbnail — silme düğmesiyle ───────────────────────── */
+function createThumb(canvas, entry) {
+  const wrap = document.createElement('div');
+  wrap.className = 'thumb-item';
+  wrap.title = entry.name;
+
+  const tc = document.createElement('canvas');
+  tc.width = 46; tc.height = 46;
+  const ratio = Math.min(46 / canvas.width, 46 / canvas.height);
+  const tw = canvas.width * ratio, th = canvas.height * ratio;
+  tc.getContext('2d').drawImage(canvas, (46 - tw) / 2, (46 - th) / 2, tw, th);
+  const img = document.createElement('img');
+  img.src = tc.toDataURL('image/jpeg', 0.7);
+
+  // Silme düğmesi (hover'da görünür)
+  const del = document.createElement('button');
+  del.className = 'thumb-delete';
+  del.title = 'Bu görüntüyü sil';
+  del.innerHTML = '&times;';
+  del.addEventListener('click', e => { e.stopPropagation(); removeImage(entry); });
+
+  wrap.appendChild(img);
+  wrap.appendChild(del);
+
+  wrap.addEventListener('click', () => {
+    const idx = state.files.indexOf(entry);
+    if (idx >= 0) activateImage(idx);
+  });
+
+  entry.thumb = wrap;
+  dom.thumbBar.appendChild(wrap);
+  return wrap;
+}
+
+/* ── Görüntü sil ─────────────────────────────────────────── */
+function removeImage(entry) {
+  const idx = state.files.indexOf(entry);
+  if (idx < 0) return;
+
+  // DOM temizliği
+  entry.thumb && entry.thumb.remove();
+  entry.batchItem && entry.batchItem.remove();
+
+  // Durum temizliği
+  state.files.splice(idx, 1);
+
+  if (state.files.length === 0) {
+    state.activeIdx = -1;
+    dom.canvasEmpty.hidden = false;
+    dom.viewerWrap.hidden  = true;
+    clearInfoPanel();
+    setStatus('Tüm görüntüler silindi');
+    return;
+  }
+
+  // Seçili indeksi güncelle
+  if (state.activeIdx === idx) {
+    // Silinen aktifti → aynı pozisyondaki (veya son) görüntüyü seç
+    activateImage(Math.min(idx, state.files.length - 1));
+  } else if (state.activeIdx > idx) {
+    // Silinen aktifin önündeydi → indexi bir azalt, sadece vurguyu güncelle
+    state.activeIdx--;
+    dom.thumbBar.querySelectorAll('.thumb-item').forEach((t, i) =>
+      t.classList.toggle('active', i === state.activeIdx));
+  }
+
+  setStatus(state.files.length + ' görüntü', 'ok');
+}
+
+/* ── Geri alma (Undo) ────────────────────────────────────── */
+function pushHistory(entry) {
+  if (!entry.history) entry.history = [];
+  const src = entry.resultCanvas;
+  if (!src) return;
+  const snap = document.createElement('canvas');
+  snap.width = src.width; snap.height = src.height;
+  snap.getContext('2d').drawImage(src, 0, 0);
+  entry.history.push(snap);
+  if (entry.history.length > UNDO_MAX) entry.history.shift();
+  updateUndoButton();
+}
+
+function undo() {
+  if (state.activeIdx < 0) return;
+  const entry = state.files[state.activeIdx];
+  if (!entry?.history?.length) { setStatus('Geri alınacak işlem yok'); return; }
+  entry.resultCanvas = entry.history.pop();
+  drawToCanvas(entry.resultCanvas, dom.canvasAfter);
+  updateSliderCanvases();
+  setStatus('Geri alındı (' + entry.history.length + ' adım kaldı)', 'ok');
+  updateUndoButton();
+}
+
+function updateUndoButton() {
+  const entry     = state.activeIdx >= 0 ? state.files[state.activeIdx] : null;
+  const hasHist   = !!(entry?.history?.length);
+  if (dom.btnUndo) dom.btnUndo.disabled = !hasHist;
+}
+
+/* ── Tümünü temizle ──────────────────────────────────────── */
+function clearAllImages() {
+  state.files.forEach(e => {
+    e.thumb     && e.thumb.remove();
+    e.batchItem && e.batchItem.remove();
+  });
+  state.files   = [];
+  state.activeIdx = -1;
+  dom.canvasEmpty.hidden = false;
+  dom.viewerWrap.hidden  = true;
+  clearInfoPanel();
+  setStatus('Tüm görüntüler temizlendi');
+}
+
+/* ── Referansı kaldır ────────────────────────────────────── */
+function removeRef() {
+  if (typeof Pipeline !== 'undefined' && Pipeline.clearCustomRef) {
+    Pipeline.clearCustomRef();
+  }
+  dom.refThumb.style.display = 'none';
+  dom.refThumb.innerHTML = '';
+  // İlk preset'i aktif yap
+  const first = document.querySelector('.btn-preset');
+  if (first) {
+    document.querySelectorAll('.btn-preset').forEach(b => b.classList.remove('active'));
+    first.classList.add('active');
+    Pipeline.setPreset(first.dataset.preset);
+  }
+  setStatus('Referans kaldırıldı, varsayılan preset aktif', 'ok');
+}
+
+/* ── Dosyaları ekle ──────────────────────────────────────── */
+async function addFiles(files) {
+  for (const file of files) {
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (!['jpg', 'jpeg', 'png', 'tif', 'tiff'].includes(ext)) continue;
+    setStatus('Yükleniyor: ' + file.name);
+    try {
+      const canvas = await loadImageFile(file);
+      const entry  = {
+        file, name: file.name,
+        origCanvas: canvas, resultCanvas: null,
+        processed: false, stainType: '—',
+        history: [],
+      };
+      state.files.push(entry);
+      createThumb(canvas, entry);
+
+      const bItem = document.createElement('div');
+      bItem.className = 'batch-item';
+      bItem.innerHTML = `<div class="batch-dot pending"></div>
+        <span class="batch-item-name">${file.name}</span>`;
+      entry.batchItem = bItem;
+      dom.batchList.appendChild(bItem);
+
+      if (state.activeIdx === -1) activateImage(0);
+    } catch (err) {
+      showError('Yükleme hatası: ' + file.name + ' — ' + err.message);
+    }
+  }
+  setStatus(state.files.length + ' görüntü yüklendi', 'ok');
+}
+
+/* ── Aktif görüntü ───────────────────────────────────────── */
+function activateImage(idx) {
+  state.activeIdx = idx;
+  dom.thumbBar.querySelectorAll('.thumb-item').forEach((t, i) =>
+    t.classList.toggle('active', i === idx));
+
+  const entry = state.files[idx];
+  updateUndoButton();
+  dom.infoSize.textContent   = entry.origCanvas.width + ' × ' + entry.origCanvas.height + ' px';
+  dom.infoFormat.textContent = entry.name.split('.').pop().toUpperCase();
+  dom.infoStain.textContent  = entry.stainType;
+  dom.infoStatus.textContent = entry.processed ? 'İşlendi' : 'Bekliyor';
+
+  dom.canvasEmpty.hidden = true;
+  dom.viewerWrap.hidden  = false;
+
+  drawToCanvas(entry.origCanvas,                       dom.canvasBefore);
+  drawToCanvas(entry.resultCanvas || entry.origCanvas, dom.canvasAfter);
+  updateSliderCanvases();
+  applyZoom();
+}
+
+function drawToCanvas(src, dst) {
+  dst.width  = src.width;
+  dst.height = src.height;
+  dst.getContext('2d').drawImage(src, 0, 0);
+}
+
+function updateSliderCanvases() {
+  if (state.activeIdx < 0) return;
+  const e = state.files[state.activeIdx];
+  drawToCanvas(e.origCanvas,                   dom.canvasSliderBase);
+  drawToCanvas(e.resultCanvas || e.origCanvas, dom.canvasSliderTop);
+  requestAnimationFrame(() => {
+    const dw = dom.canvasSliderBase.offsetWidth;
+    const dh = dom.canvasSliderBase.offsetHeight;
+    if (dw > 0) {
+      dom.canvasSliderTop.style.width  = dw + 'px';
+      dom.canvasSliderTop.style.height = dh + 'px';
+    }
+    updateSliderPosition();
+  });
+}
+
+function applyZoom() {
+  const z = state.zoom;
+  dom.zoomLabel.textContent = Math.round(z * 100) + '%';
+  [dom.canvasBefore, dom.canvasAfter,
+   dom.canvasSliderBase, dom.canvasSliderTop].forEach(c => {
+    c.style.transform = 'scale(' + z + ')';
+  });
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode;
+  dom.splitView.hidden  = mode !== 'split';
+  dom.sliderView.hidden = mode !== 'slider';
+  if (mode === 'after') {
+    dom.splitView.hidden = false;
+    dom.canvasBefore.parentElement.style.display = 'none';
+  } else {
+    dom.canvasBefore.parentElement.style.display = '';
+  }
+  document.querySelectorAll('.view-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.view === mode));
+  if (mode === 'slider') updateSliderCanvases();
+}
+
+function updateSliderPosition() {
+  const displayW = dom.canvasSliderBase.offsetWidth || dom.canvasSliderBase.width;
+  const px = displayW * state.sliderX;
+  dom.sliderHandle.style.left   = px + 'px';
+  dom.sliderOverlay.style.width = px + 'px';
+}
+
+function initSliderDrag() {
+  let dragging = false;
+  dom.sliderHandle.addEventListener('mousedown', e => { dragging = true; e.preventDefault(); });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const rect = dom.canvasSliderBase.getBoundingClientRect();
+    state.sliderX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    updateSliderPosition();
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
+}
+
+/* ── Overlay ─────────────────────────────────────────────── */
+function showProcessing(show, msg = 'İşleniyor…') {
+  dom.processingOverlay.style.display = show ? 'flex' : 'none';
+  dom.processingMsg.textContent = msg;
+  if (!show) {
+    dom.progressBar.style.width = '0%';
+    console.log('[app] ✓ overlay kapatıldı');
+  } else {
+    console.log('[app] overlay açıldı:', msg);
+  }
+}
+
+function setProgress(pct, msg) {
+  dom.progressBar.style.width = pct + '%';
+  if (msg) dom.processingMsg.textContent = msg;
+}
+
+/* ── Zaman aşımı ─────────────────────────────────────────── */
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('İşlem zaman aşımına uğradı (' + ms / 1000 + ' sn)')), ms);
+    promise.then(
+      val => { clearTimeout(timer); resolve(val); },
+      err => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
+/* ── İşleme seçenekleri ──────────────────────────────────── */
+function getProcessingOpts() {
+  return {
+    cropBorder:        $('chkCropBorder').checked,
+    flatField:         $('chkFlatField').checked,
+    whiteBalance:      $('chkWhiteBalance').checked,
+    stainNorm:         $('chkStainNorm').checked,
+    clahe:             $('chkClahe').checked,
+    sharpen:           $('chkSharpen').checked,
+    stainType:         document.querySelector('input[name="stain"]:checked').value,
+    flatFieldStrength: parseInt($('sFlatField').value),
+    sharpenAmount:     parseInt($('sSharpen').value),
+    hemaScale:         parseInt($('sHema').value),
+    eosinScale:        parseInt($('sEosin').value),
+    dabScale:          parseInt($('sDAB').value),
+    brightness:        parseInt($('sBrightness').value),
+    contrast:          parseInt($('sContrast').value),
+    saturation:        parseInt($('sSaturation').value),
+    temperature:       parseInt($('sTemperature').value),
+    applyManual:       false,
+  };
+}
+
+/* ── Ana işleme ──────────────────────────────────────────── */
+async function processActive() {
+  if (state.activeIdx < 0) { showError('Önce bir görüntü yükleyin.'); return; }
+  if (!state.openCVReady)  { showError('OpenCV henüz hazır değil, lütfen bekleyin.'); return; }
+
+  const entry = state.files[state.activeIdx];
+
+  hideError();
+  showProcessing(true, 'Hazırlanıyor…');
+  setStatus('İşleniyor: ' + entry.name);
+  setProcessingButtons(false);
+
+  try {
+    pushHistory(entry);   // işlemden önce geri alma geçmişine ekle
+
+    const opts = getProcessingOpts();
+    const { canvas: workCanvas, scale } = downscaleCanvas(entry.origCanvas, MAX_PROCESS_PX);
+
+    const { imgData, stainType } = await withTimeout(
+      Pipeline.process(workCanvas, opts, (pct, msg) => setProgress(pct, msg)),
+      PROCESS_TIMEOUT_MS
+    );
+
+    const smallResult = document.createElement('canvas');
+    smallResult.width  = imgData.width;
+    smallResult.height = imgData.height;
+    smallResult.getContext('2d').putImageData(imgData, 0, 0);
+
+    // imgData boyutunu scale ile böl: dairesel kırpma sonrası çıktı orijinalden
+    // farklı olabilir (2r×2r kare). origW/origH kullanmak kareyi ovale esneter.
+    const outW   = Math.round(imgData.width  / scale);
+    const outH   = Math.round(imgData.height / scale);
+    const result = scale < 1 ? upscaleCanvas(smallResult, outW, outH) : smallResult;
+
+    entry.resultCanvas = result;
+    entry.processed    = true;
+    entry.lastOpts     = opts;   // tam çözünürlük indirme için sakla
+    entry.stainType    = stainType === 'ihk' ? 'İHK (DAB)' : 'H&E';
+
+    const badge = entry.thumb.querySelector('.thumb-status') || document.createElement('span');
+    badge.className   = 'thumb-status done';
+    badge.textContent = '✓';
+    entry.thumb.appendChild(badge);
+
+    if (entry.batchItem)
+      entry.batchItem.querySelector('.batch-dot').className = 'batch-dot done';
+
+    dom.infoStain.textContent  = entry.stainType;
+    dom.infoStatus.textContent = 'İşlendi';
+    drawToCanvas(result, dom.canvasAfter);
+    updateSliderCanvases();
+    setStatus('İşlendi: ' + entry.name, 'ok');
+
+  } catch (err) {
+    console.error('[app] processActive hatası:', err.stack || err);
+    showError('İşleme hatası: ' + err.message);
+    setStatus('Hata: ' + err.message, 'error');
+    if (entry.batchItem)
+      entry.batchItem.querySelector('.batch-dot').className = 'batch-dot error';
+
+  } finally {
+    console.log('[app] processActive finally — overlay kapatılıyor');
+    showProcessing(false);
+    setProcessingButtons(true);
+  }
+}
+
+/* ── Manuel ayar — TAM çözünürlükte uygula ──────────────── */
+async function applyManualOpts() {
+  if (state.activeIdx < 0) { showError('Önce bir görüntü yükleyin.'); return; }
+  if (!state.openCVReady)  { showError('OpenCV henüz hazır değil.'); return; }
+
+  const entry = state.files[state.activeIdx];
+  hideError();
+  showProcessing(true, 'Manuel ayarlar uygulanıyor…');
+  setProcessingButtons(false);
+
+  try {
+    pushHistory(entry);   // manuel uygula öncesi geçmişe ekle
+
+    // Double-resampling blur önleme: resultCanvas'tan değil origCanvas'tan başla.
+    // Auto opts mevcutsa (lastOpts) bunları manuel ayarlarla birleştir → tek geçişte tam kalite.
+    let opts, src;
+    if (entry.lastOpts && entry.origCanvas) {
+      opts = { ...entry.lastOpts, ...getProcessingOpts(), applyManual: true };
+      src  = entry.origCanvas;
+    } else {
+      opts = {
+        ...getProcessingOpts(),
+        flatField: false, whiteBalance: false, stainNorm: false,
+        clahe: false, sharpen: false, applyManual: true,
+      };
+      src = entry.resultCanvas || entry.origCanvas;
+    }
+    const { canvas: workCanvas, scale } = downscaleCanvas(src, MAX_PROCESS_PX);
+    const { imgData } = await withTimeout(
+      Pipeline.process(workCanvas, opts, (p, m) => setProgress(p, m)),
+      PROCESS_TIMEOUT_MS
+    );
+    const small = document.createElement('canvas');
+    small.width = imgData.width; small.height = imgData.height;
+    small.getContext('2d').putImageData(imgData, 0, 0);
+    const result = scale < 1 ? upscaleCanvas(small, src.width, src.height) : small;
+    entry.resultCanvas = result;
+    entry.lastOpts     = opts;   // sonraki indir çağrısı güncel ayarları kullansın
+    drawToCanvas(result, dom.canvasAfter);
+    updateSliderCanvases();
+    setStatus('Manuel ayarlar uygulandı', 'ok');
+  } catch (err) {
+    console.error('[app] applyManualOpts hatası:', err.stack || err);
+    showError('Manuel ayar hatası: ' + err.message);
+  } finally {
+    showProcessing(false);
+    setProcessingButtons(true);
+  }
+}
+
+/* ── Canlı önizleme (kaydırıcı oynayınca, ~100 ms gecikme) ─ */
+function scheduleLivePreview() {
+  if (state.activeIdx < 0 || !state.openCVReady) return;
+  clearTimeout(_liveTimer);
+  _liveTimer = setTimeout(runLivePreview, 100);
+}
+
+async function runLivePreview() {
+  if (state.activeIdx < 0 || !state.openCVReady) return;
+  if (_livePending) { _liveNeeded = true; return; }
+  _livePending = true;
+  _liveNeeded  = false;
+
+  try {
+    const entry = state.files[state.activeIdx];
+    if (!entry) return;
+
+    // Küçük kopya üzerinde çalış (hız için)
+    const src   = entry.resultCanvas || entry.origCanvas;
+    const { canvas: small } = downscaleCanvas(src, LIVE_PREVIEW_PX);
+    const opts  = {
+      ...getProcessingOpts(),
+      flatField: false, whiteBalance: false, stainNorm: false,
+      clahe: false, sharpen: false, applyManual: true,
+    };
+    const { imgData } = await Pipeline.process(small, opts, null);
+
+    const previewSmall = document.createElement('canvas');
+    previewSmall.width  = imgData.width;
+    previewSmall.height = imgData.height;
+    previewSmall.getContext('2d').putImageData(imgData, 0, 0);
+
+    // Kaynak görüntü boyutuna ölçekle — canvasAfter küçülmesin
+    const preview = upscaleCanvas(previewSmall, src.width, src.height);
+
+    // Sonra tuvaline çiz
+    drawToCanvas(preview, dom.canvasAfter);
+
+    // Kaydırmalı görünümdeki üst katmanı da güncelle
+    drawToCanvas(preview, dom.canvasSliderTop);
+    requestAnimationFrame(() => {
+      const dw = dom.canvasSliderBase.offsetWidth;
+      const dh = dom.canvasSliderBase.offsetHeight;
+      if (dw > 0) {
+        dom.canvasSliderTop.style.width  = dw + 'px';
+        dom.canvasSliderTop.style.height = dh + 'px';
+      }
+      updateSliderPosition();
+    });
+  } catch (err) {
+    console.warn('[app] canlı önizleme hatası:', err.message || err);
+  } finally {
+    _livePending = false;
+    if (_liveNeeded) {
+      _liveNeeded = false;
+      setTimeout(runLivePreview, 50);
+    }
+  }
+}
+
+/* ── Toplu işleme ─────────────────────────────────────────── */
+async function processAll() {
+  for (let i = 0; i < state.files.length; i++) {
+    activateImage(i);
+    await processActive();
+    await new Promise(r => setTimeout(r, 30));
+  }
+  setStatus(state.files.length + ' görüntü işlendi', 'ok');
+}
+
+/* ── Referans görüntü ─────────────────────────────────────── */
+async function loadRef(file) {
+  if (!state.openCVReady) { showError('OpenCV henüz hazır değil.'); return; }
+  try {
+    const canvas  = await loadImageFile(file);
+    const imgData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+    const rgba = cv.matFromImageData(imgData);
+    const bgr  = new cv.Mat();
+    cv.cvtColor(rgba, bgr, cv.COLOR_RGBA2BGR);
+    Pipeline.setCustomRef(bgr);
+    rgba.delete(); bgr.delete();
+
+    dom.refThumb.style.display = 'block';
+    dom.refThumb.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = canvas.toDataURL('image/jpeg', 0.7);
+    dom.refThumb.appendChild(img);
+    document.querySelectorAll('.btn-preset').forEach(b => b.classList.remove('active'));
+    setStatus('Referans görüntü yüklendi', 'ok');
+  } catch (err) {
+    showError('Referans yüklenemedi: ' + err.message);
+  }
+}
+
+/* ── Dışa aktarma ─────────────────────────────────────────── */
+function getExportCanvas(entry) {
+  const src  = entry.resultCanvas || entry.origCanvas;
+  const reqW = parseInt($('exportWidth').value)  || src.width;
+  const reqH = parseInt($('exportHeight').value) || src.height;
+  if (reqW === src.width && reqH === src.height) return src;
+  const out = document.createElement('canvas');
+  out.width = reqW; out.height = reqH;
+  out.getContext('2d').drawImage(src, 0, 0, reqW, reqH);
+  return out;
+}
+
+function canvasToBlob(canvas, format, quality) {
+  return new Promise(resolve => {
+    if (format === 'tiff') {
+      const id  = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+      const buf = UTIF.encodeImage(id.data, canvas.width, canvas.height);
+      resolve(new Blob([buf], { type: 'image/tiff' }));
+    } else {
+      canvas.toBlob(resolve, 'image/' + format, quality / 100);
+    }
+  });
+}
+
+function baseName(fname) { return fname.replace(/\.[^/.]+$/, ''); }
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a   = Object.assign(document.createElement('a'), { href: url, download: filename });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportSingle() {
+  if (state.activeIdx < 0) return;
+  const entry = state.files[state.activeIdx];
+
+  // İşlenmiş ve opts mevcutsa: orijinal tam çözünürlükte yeniden pipeline çalıştır.
+  // Canlı önizleme 1500 px'de çalışır; indirme gerçek piksel kalitesinde olmalı.
+  if (entry.processed && entry.lastOpts && entry.origCanvas) {
+    setStatus('Tam çözünürlük hazırlanıyor…');
+    showProcessing(true, 'Tam çözünürlük işleniyor…');
+    setProcessingButtons(false);
+    try {
+      const { imgData } = await withTimeout(
+        Pipeline.process(entry.origCanvas, entry.lastOpts, (p, m) => setProgress(p, m)),
+        PROCESS_TIMEOUT_MS * 3
+      );
+      const fullCanvas = document.createElement('canvas');
+      fullCanvas.width  = imgData.width;
+      fullCanvas.height = imgData.height;
+      fullCanvas.getContext('2d').putImageData(imgData, 0, 0);
+      console.log('[app] indirilen boyut: ' + fullCanvas.width + 'x' + fullCanvas.height + ' px');
+
+      // İsteğe bağlı yeniden ölçekle
+      const reqW = parseInt($('exportWidth').value)  || fullCanvas.width;
+      const reqH = parseInt($('exportHeight').value) || fullCanvas.height;
+      const outCanvas = (reqW !== fullCanvas.width || reqH !== fullCanvas.height)
+        ? upscaleCanvas(fullCanvas, reqW, reqH) : fullCanvas;
+
+      const format  = $('exportFormat').value;
+      const quality = parseInt($('exportQuality').value);
+      const blob = await canvasToBlob(outCanvas, format, quality);
+      downloadBlob(blob, baseName(entry.name) + '.' + (format === 'jpeg' ? 'jpg' : format));
+      setStatus('İndirildi (tam çözünürlük ' + fullCanvas.width + '×' + fullCanvas.height + '): ' + entry.name, 'ok');
+    } catch (err) {
+      console.error('[app] tam çözünürlük dışa aktarma hatası:', err);
+      showError('İndirme hatası: ' + err.message);
+      setStatus('Hata: ' + err.message, 'error');
+    } finally {
+      showProcessing(false);
+      setProcessingButtons(true);
+    }
+    return;
+  }
+
+  // İşlenmemiş → mevcut canvas'ı indir
+  const canvas  = getExportCanvas(entry);
+  const format  = $('exportFormat').value;
+  const quality = parseInt($('exportQuality').value);
+  setStatus('Dışa aktarılıyor…');
+  const blob = await canvasToBlob(canvas, format, quality);
+  downloadBlob(blob, baseName(entry.name) + '.' + (format === 'jpeg' ? 'jpg' : format));
+  setStatus('İndirildi: ' + entry.name, 'ok');
+}
+
+async function exportBatch() {
+  if (state.files.length === 0) return;
+  const format  = $('exportFormat').value;
+  const quality = parseInt($('exportQuality').value);
+  const zip     = new JSZip();
+  showProcessing(true, 'ZIP hazırlanıyor…');
+  try {
+    for (let i = 0; i < state.files.length; i++) {
+      const entry = state.files[i];
+      let canvas;
+
+      if (entry.processed && entry.lastOpts && entry.origCanvas) {
+        setProgress(Math.round(i / state.files.length * 85),
+          (i + 1) + '/' + state.files.length + ' tam çözünürlük…');
+        const { imgData } = await Pipeline.process(entry.origCanvas, entry.lastOpts, null);
+        canvas = document.createElement('canvas');
+        canvas.width = imgData.width; canvas.height = imgData.height;
+        canvas.getContext('2d').putImageData(imgData, 0, 0);
+        console.log('[app] batch ' + (i + 1) + ' boyutu: '
+          + canvas.width + 'x' + canvas.height + ' px');
+      } else {
+        canvas = getExportCanvas(entry);
+      }
+
+      const blob = await canvasToBlob(canvas, format, quality);
+      const ext  = format === 'jpeg' ? 'jpg' : format;
+      zip.file(baseName(entry.name) + '_processed.' + ext, blob);
+      setProgress(Math.round((i + 1) / state.files.length * 85),
+        (i + 1) + '/' + state.files.length + ' hazırlandı');
+    }
+    setProgress(95, 'ZIP sıkıştırılıyor…');
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    downloadBlob(zipBlob, 'patogoru_batch.zip');
+    setStatus('Toplu indirme tamamlandı', 'ok');
+  } finally {
+    showProcessing(false);
+  }
+}
+
+/* ── Kaydırıcı senkronizasyonu ───────────────────────────── */
+// live: true → kaydırılınca canlı önizleme tetikle
+function syncSlider(inputId, valueId, live = false) {
+  const input = $(inputId), span = $(valueId);
+  if (!input || !span) return;
+  input.addEventListener('input', () => {
+    span.textContent = input.value;
+    if (live) scheduleLivePreview();
+  });
+}
+
+/* ── Olayları bağla ──────────────────────────────────────── */
+function bindEvents() {
+  // Hata kutusu
+  $('btnErrorClose').addEventListener('click', hideError);
+
+  // Sürükle-bırak
+  dom.dropZone.addEventListener('click', () => dom.fileInput.click());
+  dom.fileInput.addEventListener('change', e => addFiles(e.target.files));
+  dom.dropZone.addEventListener('dragover',  e => { e.preventDefault(); dom.dropZone.classList.add('drag-over'); });
+  dom.dropZone.addEventListener('dragleave', () => dom.dropZone.classList.remove('drag-over'));
+  dom.dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dom.dropZone.classList.remove('drag-over');
+    addFiles(e.dataTransfer.files);
+  });
+
+  // Tümünü temizle
+  if (dom.btnClearAll) dom.btnClearAll.addEventListener('click', clearAllImages);
+
+  // Referans kaldır
+  if (dom.btnRemoveRef) dom.btnRemoveRef.addEventListener('click', removeRef);
+
+  // Görünüm
+  document.querySelectorAll('.view-btn').forEach(btn =>
+    btn.addEventListener('click', () => setViewMode(btn.dataset.view)));
+
+  // Zoom
+  $('btnZoomIn').addEventListener('click',  () => { state.zoom = Math.min(state.zoom * 1.25, 8); applyZoom(); });
+  $('btnZoomOut').addEventListener('click', () => { state.zoom = Math.max(state.zoom / 1.25, 0.1); applyZoom(); });
+  $('btnZoomFit').addEventListener('click', () => { state.zoom = 1.0; applyZoom(); });
+
+  // İşleme
+  dom.btnAutoProcess.addEventListener('click',  processActive);
+  dom.btnBatchProcess.addEventListener('click', processAll);
+
+  // "Uygula" — tam çözünürlükte manuel ayar
+  dom.btnApplyManual.addEventListener('click', applyManualOpts);
+
+  // "Geri Al" + Ctrl+Z
+  if (dom.btnUndo) dom.btnUndo.addEventListener('click', undo);
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      undo();
+    }
+  });
+
+  // "Sıfırla" — kaydırıcıları varsayılana döndür, görüntüyü orijinal sonuca geri al
+  $('btnResetManual').addEventListener('click', () => {
+    ['sBrightness','sContrast','sSaturation','sTemperature'].forEach(id => $(id).value = 0);
+    ['sHema','sEosin','sDAB'].forEach(id => $(id).value = 100);
+    $('sSharpen').value   = 0;
+    $('sFlatField').value = 28;
+    document.querySelectorAll('.slider-val').forEach(s => {
+      const inp = s.previousElementSibling;
+      if (inp && inp.type === 'range') s.textContent = inp.value;
+    });
+    // canvasAfter'ı işlenmiş (ya da orijinal) sonuca döndür
+    if (state.activeIdx >= 0) {
+      const e = state.files[state.activeIdx];
+      const src = e.resultCanvas || e.origCanvas;
+      drawToCanvas(src, dom.canvasAfter);
+      drawToCanvas(src, dom.canvasSliderTop);
+      requestAnimationFrame(() => {
+        const dw = dom.canvasSliderBase.offsetWidth;
+        const dh = dom.canvasSliderBase.offsetHeight;
+        if (dw > 0) {
+          dom.canvasSliderTop.style.width  = dw + 'px';
+          dom.canvasSliderTop.style.height = dh + 'px';
+        }
+        updateSliderPosition();
+      });
+    }
+  });
+
+  // Dışa aktar
+  $('btnExportSingle').addEventListener('click', exportSingle);
+  $('btnExportBatch').addEventListener('click',  exportBatch);
+
+  // Sekme geçişi
+  $('appTabs').addEventListener('click', e => {
+    const btn = e.target.closest('.app-tab');
+    if (!btn) return;
+    document.querySelectorAll('.app-tab').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    $('tabEditor').hidden  = tab !== 'editor';
+    $('tabCollage').hidden = tab !== 'collage';
+    if (tab === 'collage') Collage.onTabActivated();
+  });
+
+  $('exportFormat').addEventListener('change', e => {
+    dom.jpgQualityRow.style.display = e.target.value === 'jpeg' ? '' : 'none';
+  });
+
+  // Referans
+  $('btnLoadRef').addEventListener('click', () => dom.refInput.click());
+  dom.refInput.addEventListener('change', e => { if (e.target.files[0]) loadRef(e.target.files[0]); });
+
+  // Presetler
+  document.querySelectorAll('.btn-preset').forEach(btn =>
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.btn-preset').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      Pipeline.setPreset(btn.dataset.preset);
+      setStatus('Referans: ' + btn.textContent, 'ok');
+    }));
+
+  // Boya tipi radyo
+  document.querySelectorAll('input[name="stain"]').forEach(radio =>
+    radio.addEventListener('change', () => {
+      document.querySelectorAll('.radio-btn').forEach(lbl =>
+        lbl.classList.toggle('active', lbl.querySelector('input') === radio));
+    }));
+
+  // Kaydırmalı görünüm
+  initSliderDrag();
+
+  // Kaydırıcı senkronizasyonu + canlı önizleme
+  // live=true → parlaklık/kontrast/doygunluk/sıcaklık/boya değişince anında yansı
+  [
+    ['sBrightness',   'vBrightness',    true],
+    ['sContrast',     'vContrast',      true],
+    ['sSaturation',   'vSaturation',    true],
+    ['sTemperature',  'vTemperature',   true],
+    ['sHema',         'vHema',          true],
+    ['sEosin',        'vEosin',         true],
+    ['sDAB',          'vDAB',           true],
+    ['sSharpen',      'vSharpen',       true],
+    ['sFlatField',    'vFlatField',     false],  // pipeline adımı, manuel değil
+    ['exportQuality', 'vExportQuality', false],
+  ].forEach(([i, v, lp]) => syncSlider(i, v, lp));
+
+  // Manuel bölüm daralt/genişlet
+  $('btnCollapseManual').addEventListener('click', () => {
+    const sl  = $('manualSliders');
+    const btn = $('btnCollapseManual');
+    const collapsed = sl.style.display === 'none';
+    sl.style.display = collapsed ? '' : 'none';
+    btn.textContent  = collapsed ? '▾' : '▸';
+  });
+
+  // En/boy kilidi
+  $('exportWidth').addEventListener('input', () => {
+    if (!$('chkLockAspect').checked || state.activeIdx < 0) return;
+    const src = state.files[state.activeIdx].resultCanvas || state.files[state.activeIdx].origCanvas;
+    const w   = parseInt($('exportWidth').value);
+    if (w) $('exportHeight').value = Math.round(w * src.height / src.width);
+  });
+  $('exportHeight').addEventListener('input', () => {
+    if (!$('chkLockAspect').checked || state.activeIdx < 0) return;
+    const src = state.files[state.activeIdx].resultCanvas || state.files[state.activeIdx].origCanvas;
+    const h   = parseInt($('exportHeight').value);
+    if (h) $('exportWidth').value = Math.round(h * src.width / src.height);
+  });
+}
+
+/* ── Başlangıç ───────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  initDom();
+  bindEvents();
+  initOpenCV();
+  try { Collage.init(); } catch (e) { console.error('[app] Collage.init hatası:', e); }
+});
