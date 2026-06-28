@@ -511,6 +511,7 @@ async function processActive() {
 
     entry.resultCanvas = result;
     entry.processed    = true;
+    entry.lastOpts     = opts;   // tam çözünürlük indirme için sakla
     entry.stainType    = stainType === 'ihk' ? 'İHK (DAB)' : 'H&E';
 
     const badge = entry.thumb.querySelector('.thumb-status') || document.createElement('span');
@@ -553,12 +554,21 @@ async function applyManualOpts() {
 
   try {
     pushHistory(entry);   // manuel uygula öncesi geçmişe ekle
-    const opts = {
-      ...getProcessingOpts(),
-      flatField: false, whiteBalance: false, stainNorm: false,
-      clahe: false, sharpen: false, applyManual: true,
-    };
-    const src = entry.resultCanvas || entry.origCanvas;
+
+    // Double-resampling blur önleme: resultCanvas'tan değil origCanvas'tan başla.
+    // Auto opts mevcutsa (lastOpts) bunları manuel ayarlarla birleştir → tek geçişte tam kalite.
+    let opts, src;
+    if (entry.lastOpts && entry.origCanvas) {
+      opts = { ...entry.lastOpts, ...getProcessingOpts(), applyManual: true };
+      src  = entry.origCanvas;
+    } else {
+      opts = {
+        ...getProcessingOpts(),
+        flatField: false, whiteBalance: false, stainNorm: false,
+        clahe: false, sharpen: false, applyManual: true,
+      };
+      src = entry.resultCanvas || entry.origCanvas;
+    }
     const { canvas: workCanvas, scale } = downscaleCanvas(src, MAX_PROCESS_PX);
     const { imgData } = await withTimeout(
       Pipeline.process(workCanvas, opts, (p, m) => setProgress(p, m)),
@@ -569,6 +579,7 @@ async function applyManualOpts() {
     small.getContext('2d').putImageData(imgData, 0, 0);
     const result = scale < 1 ? upscaleCanvas(small, src.width, src.height) : small;
     entry.resultCanvas = result;
+    entry.lastOpts     = opts;   // sonraki indir çağrısı güncel ayarları kullansın
     drawToCanvas(result, dom.canvasAfter);
     updateSliderCanvases();
     setStatus('Manuel ayarlar uygulandı', 'ok');
@@ -710,7 +721,48 @@ function downloadBlob(blob, filename) {
 
 async function exportSingle() {
   if (state.activeIdx < 0) return;
-  const entry   = state.files[state.activeIdx];
+  const entry = state.files[state.activeIdx];
+
+  // İşlenmiş ve opts mevcutsa: orijinal tam çözünürlükte yeniden pipeline çalıştır.
+  // Canlı önizleme 1500 px'de çalışır; indirme gerçek piksel kalitesinde olmalı.
+  if (entry.processed && entry.lastOpts && entry.origCanvas) {
+    setStatus('Tam çözünürlük hazırlanıyor…');
+    showProcessing(true, 'Tam çözünürlük işleniyor…');
+    setProcessingButtons(false);
+    try {
+      const { imgData } = await withTimeout(
+        Pipeline.process(entry.origCanvas, entry.lastOpts, (p, m) => setProgress(p, m)),
+        PROCESS_TIMEOUT_MS * 3
+      );
+      const fullCanvas = document.createElement('canvas');
+      fullCanvas.width  = imgData.width;
+      fullCanvas.height = imgData.height;
+      fullCanvas.getContext('2d').putImageData(imgData, 0, 0);
+      console.log('[app] indirilen boyut: ' + fullCanvas.width + 'x' + fullCanvas.height + ' px');
+
+      // İsteğe bağlı yeniden ölçekle
+      const reqW = parseInt($('exportWidth').value)  || fullCanvas.width;
+      const reqH = parseInt($('exportHeight').value) || fullCanvas.height;
+      const outCanvas = (reqW !== fullCanvas.width || reqH !== fullCanvas.height)
+        ? upscaleCanvas(fullCanvas, reqW, reqH) : fullCanvas;
+
+      const format  = $('exportFormat').value;
+      const quality = parseInt($('exportQuality').value);
+      const blob = await canvasToBlob(outCanvas, format, quality);
+      downloadBlob(blob, baseName(entry.name) + '.' + (format === 'jpeg' ? 'jpg' : format));
+      setStatus('İndirildi (tam çözünürlük ' + fullCanvas.width + '×' + fullCanvas.height + '): ' + entry.name, 'ok');
+    } catch (err) {
+      console.error('[app] tam çözünürlük dışa aktarma hatası:', err);
+      showError('İndirme hatası: ' + err.message);
+      setStatus('Hata: ' + err.message, 'error');
+    } finally {
+      showProcessing(false);
+      setProcessingButtons(true);
+    }
+    return;
+  }
+
+  // İşlenmemiş → mevcut canvas'ı indir
   const canvas  = getExportCanvas(entry);
   const format  = $('exportFormat').value;
   const quality = parseInt($('exportQuality').value);
@@ -728,12 +780,26 @@ async function exportBatch() {
   showProcessing(true, 'ZIP hazırlanıyor…');
   try {
     for (let i = 0; i < state.files.length; i++) {
-      const entry  = state.files[i];
-      const canvas = getExportCanvas(entry);
-      const blob   = await canvasToBlob(canvas, format, quality);
-      const ext    = format === 'jpeg' ? 'jpg' : format;
+      const entry = state.files[i];
+      let canvas;
+
+      if (entry.processed && entry.lastOpts && entry.origCanvas) {
+        setProgress(Math.round(i / state.files.length * 85),
+          (i + 1) + '/' + state.files.length + ' tam çözünürlük…');
+        const { imgData } = await Pipeline.process(entry.origCanvas, entry.lastOpts, null);
+        canvas = document.createElement('canvas');
+        canvas.width = imgData.width; canvas.height = imgData.height;
+        canvas.getContext('2d').putImageData(imgData, 0, 0);
+        console.log('[app] batch ' + (i + 1) + ' boyutu: '
+          + canvas.width + 'x' + canvas.height + ' px');
+      } else {
+        canvas = getExportCanvas(entry);
+      }
+
+      const blob = await canvasToBlob(canvas, format, quality);
+      const ext  = format === 'jpeg' ? 'jpg' : format;
       zip.file(baseName(entry.name) + '_processed.' + ext, blob);
-      setProgress(Math.round((i + 1) / state.files.length * 90),
+      setProgress(Math.round((i + 1) / state.files.length * 85),
         (i + 1) + '/' + state.files.length + ' hazırlandı');
     }
     setProgress(95, 'ZIP sıkıştırılıyor…');

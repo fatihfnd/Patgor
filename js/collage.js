@@ -33,8 +33,9 @@ const Collage = (() => {
     exportW: 1000,   // per-panel export genişlik; yük = exportW × panelAspectH/W
   };
 
-  let dragSrcIdx = null;
-  let panOp      = null;
+  let dragSrcIdx   = null;
+  let panOp        = null;
+  let _collageZoom = 1.0;  // tüm kolaj önizlemesi zoom katsayısı
 
   /* ── DOM ────────────────────────────────────────────────── */
   const $c = id => document.getElementById(id);
@@ -155,8 +156,11 @@ const Collage = (() => {
       div.appendChild(img);
 
       div.addEventListener('mousedown', e => startPan(e, idx, img, w, h));
-      div.addEventListener('wheel', e => { e.preventDefault(); handleZoom(e, idx, img, w, h); },
-        { passive: false });
+      div.addEventListener('wheel', e => {
+        e.preventDefault();
+        e.stopPropagation();  // gridWrap'e kabarcıklanmayı durdur — panel kendi zoomunu yapar
+        handleZoom(e, idx, img, w, h);
+      }, { passive: false });
 
       // ── Etiket (position:absolute — layout'u itmez) ──
       const ltext = getLabel(idx);
@@ -433,24 +437,30 @@ const Collage = (() => {
         // Etiket (E: font + kontur)
         const ltext = getLabel(idx);
         if (ltext) {
-          ctx.font = `bold ${cfg.labelSize}px ${cfg.labelFont}`;
-          const lx = px + (cfg.labelPos.includes('r') ? pw - cfg.labelSize - 14 : 14);
-          const ly = py + (cfg.labelPos.includes('b') ? ph - 10 : 14 + cfg.labelSize);
+          ctx.font         = `bold ${cfg.labelSize}px ${cfg.labelFont}`;
+          ctx.textBaseline = 'top';   // ly = metnin görsel üst kenarı
+          ctx.textAlign    = 'left';  // lx = metnin sol kenarı
+          const tw   = ctx.measureText(ltext).width;
+          const pad  = Math.round(cfg.labelSize * 0.15);
+          const lPad = Math.max(8, Math.round(Math.min(pw, ph) * 0.012));
+          const isR  = cfg.labelPos.includes('r');
+          const isB  = cfg.labelPos.includes('b');
+          // Metnin sol-üst köşesi (önizleme CSS köşe + padding ile birebir uyumlu)
+          const txL  = px + (isR ? pw - lPad - tw : lPad);
+          const tyT  = py + (isB ? ph - lPad - cfg.labelSize : lPad);
 
           if (cfg.labelBg) {
-            const tw  = ctx.measureText(ltext).width;
-            const pad = Math.round(cfg.labelSize * 0.15);
             ctx.fillStyle = 'rgba(0,0,0,0.45)';
-            ctx.fillRect(lx - pad, ly - cfg.labelSize - pad / 2, tw + pad * 2, cfg.labelSize + pad);
+            ctx.fillRect(txL - pad, tyT - Math.round(pad * 0.5), tw + pad * 2, cfg.labelSize + pad);
           }
           if (cfg.strokeEnable) {
             ctx.strokeStyle = cfg.strokeColor;
             ctx.lineWidth   = cfg.strokeWidth;
             ctx.lineJoin    = 'round';
-            ctx.strokeText(ltext, lx, ly);
+            ctx.strokeText(ltext, txL, tyT);
           }
           ctx.fillStyle = cfg.labelColor;
-          ctx.fillText(ltext, lx, ly);
+          ctx.fillText(ltext, txL, tyT);
         }
         ctx.restore();
       }
@@ -523,6 +533,21 @@ const Collage = (() => {
     if (dom.btnAddAll) dom.btnAddAll.addEventListener('click', addFromEditor);
     if (dom.btnClear)  dom.btnClear.addEventListener('click',  () => { panels.length = 0; renderGrid(); });
     if (dom.btnExport) dom.btnExport.addEventListener('click', exportCollage);
+
+    // Genel kolaj zoom — imlecin panel DIŞINDA olduğu tekerlek olayları
+    // Panel wheel stopPropagation yaptığı için buraya yalnızca boş alan olayları ulaşır.
+    if (dom.gridWrap) {
+      dom.gridWrap.addEventListener('wheel', e => {
+        e.preventDefault();
+        const d = e.deltaY < 0 ? 1.13 : 1 / 1.13;
+        _collageZoom = Math.max(0.15, Math.min(5, _collageZoom * d));
+        if (dom.grid) {
+          dom.grid.style.transform      = 'scale(' + _collageZoom + ')';
+          dom.grid.style.transformOrigin = 'top center';
+        }
+        console.log('[collage] genel zoom=' + _collageZoom.toFixed(2));
+      }, { passive: false });
+    }
 
     bindDropZone();
   }

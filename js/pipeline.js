@@ -25,15 +25,18 @@ const Pipeline = (() => {
     shadowBase:        6,
 
     // CLAHE
-    claheClip:         1.5,    // 3.0 fazla agresifti
+    claheClip:         1.2,    // düşürüldü: 1.5→1.2 (doku kontrast abartması önleme)
     claheTile:         8,
 
-    // Arka plan / doku maskesi (HSV değerleri, 0-255 ölçeği)
-    bgSatMax:          35,     // doygunluk < bu → arka plan
-    bgValMin:          195,    // parlaklık > bu → arka plan
-    bgWhiteTarget:     247,    // arka plan temizleme hedefi — lam camı renksizleştirme
-    bgFeatherPx:       21,     // kenar yumuşatma yarıçapı (px, tek sayı)
-    bgSmoothKernel:    9,      // arka plan temizleme kernel
+    // Highlight koruması — sert beyaz yanmasını önle
+    highlightKnee:     220,    // roll-off başlangıcı (bu değerin üstü kırpılır)
+    highlightTarget:   242,    // maksimum çıkış değeri (255'e kesinlikle yakılmaz)
+
+    // Arka plan / doku maskesi — ÇOK KATIL tutuldu: yalnızca gerçek boş cam
+    bgSatMax:          10,     // 35→10: neredeyse sıfır doygunluk (gerçek beyaz cam)
+    bgValMin:          238,    // 195→238: çok parlak pikseller (neredeyse beyaz)
+    bgWhiteTarget:     245,    // 247→245: daha doğal hedef
+    bgFeatherPx:       31,     // 21→31: daha geniş feather → doku-cam sınırı yumuşak
 
     // Parlaklık koruması
     brightnessCompMax: 1.12,   // maksimum telafi katsayısı (aşırı aydınlatmayı önler)
@@ -198,6 +201,17 @@ const Pipeline = (() => {
     );
     mask.delete();
 
+    // Gerekli ölçeği kontrol et: çok büyükse referans doku rengi demektir (cam değil) → atla.
+    // Örnek: daire içinde stroma en parlak piksel → ölçek 1.3x → stroma'yı beyaza yakıyor.
+    const maxScale = Math.max(...brightMeans.map(m => m > 10 ? TUNE.wbTarget / m : 1));
+    if (maxScale > 1.15) {
+      console.warn('[pipeline] WB: referans doku rengi (max=' + maxScale.toFixed(2)
+        + 'x BGR=[' + brightMeans.map(v => v.toFixed(0)) + ']) — WB atlandı, doku korunuyor');
+      for (let i = 0; i < 3; i++) inChs.get(i).delete();
+      inChs.delete();
+      return src.clone();
+    }
+
     const outChs = new cv.MatVector();
     cv.split(src, outChs);
     for (let i = 0; i < 3; i++) {
@@ -212,7 +226,7 @@ const Pipeline = (() => {
     inChs.delete(); outChs.delete();
 
     console.log('[pipeline] 2- WB arka plan ortalamaları:',
-      brightMeans.map(v => v.toFixed(1)));
+      brightMeans.map(v => v.toFixed(1)), '  ölçek=', maxScale.toFixed(2) + 'x');
     return result;
   }
 
@@ -233,9 +247,17 @@ const Pipeline = (() => {
     for (let i = 0; i < 3; i++) chs.get(i).delete();
     chs.delete();
 
-    const bgMask8 = new cv.Mat();
-    cv.bitwise_and(satMask, valMask, bgMask8);
+    const bgRaw = new cv.Mat();
+    cv.bitwise_and(satMask, valMask, bgRaw);
     satMask.delete(); valMask.delete();
+
+    // Doku kenarından uzaklaş: erode ile maskeyi içe çek.
+    // → doku-cam sınırındaki belirsiz piksellerden kaçınır, doku lehine karar verir.
+    const erK = Math.max(11, (Math.round(Math.min(bgr.rows, bgr.cols) * 0.02) | 1));
+    const erKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(erK, erK));
+    const bgMask8 = new cv.Mat();
+    cv.morphologyEx(bgRaw, bgMask8, cv.MORPH_ERODE, erKernel);
+    erKernel.delete(); bgRaw.delete();
 
     // Float'a çevir → kenarları yumuşat (feather) → doku-arka plan sınırı yumuşak
     const bgMaskF = new cv.Mat();
@@ -523,8 +545,8 @@ const Pipeline = (() => {
   // knee–255 aralığını [knee, targetMax] aralığına yumuşak geçişle sıkıştırır.
   // cv.LUT ile piksel başına O(1) — cv.LUT(src, 1×256 CV_8U, dst) çağrısı.
   function highlightProtect(src, knee, targetMax) {
-    knee      = (knee      !== undefined) ? knee      : 215;
-    targetMax = (targetMax !== undefined) ? targetMax : 248;
+    knee      = (knee      !== undefined) ? knee      : TUNE.highlightKnee;
+    targetMax = (targetMax !== undefined) ? targetMax : TUNE.highlightTarget;
     console.log('[pipeline] highlight knee=' + knee + ' targetMax=' + targetMax);
 
     const lutArr = new Uint8Array(256);
@@ -878,10 +900,19 @@ const Pipeline = (() => {
       console.warn('[pipeline] arka plan maskesi oluşturulamadı:', e);
     }
 
-    // 3. Boya normalizasyonu — Lab istatistiği yalnızca daire içinden
-    if (opts.stainNorm) {
+    // Maske çok geniş → doku pikselleri de yakalanmış demektir → beyazlatmayı atla
+    if (bgMask && cv.mean(bgMask)[0] > 0.85) {
+      console.warn('[pipeline] bgMask çok geniş (%'
+        + (cv.mean(bgMask)[0] * 100).toFixed(0) + ') — beyazlatma atlandı');
+      bgMask.delete(); bgMask = null;
+    }
+
+    // 3. Boya normalizasyonu — yalnızca H&E için (IHK/DAB'de Reinhard rengi bozar)
+    if (opts.stainNorm && stainType === 'he') {
       await runStep('Boya normalizasyonu…', 45,
         m => reinhardNormalize(m, opts.hemaScale ?? 100, opts.eosinScale ?? 100, circleMask8));
+    } else if (opts.stainNorm) {
+      console.log('[pipeline] IHK/DAB tespit edildi — Reinhard normalizasyon atlandı (renk koruma)');
     }
 
     // 4. CLAHE — sadece L kanalında, hafifletilmiş (clipLimit 1.5)
@@ -971,6 +1002,13 @@ const Pipeline = (() => {
       }
     }
     if (circleMask8) { circleMask8.delete(); }
+
+    // Son yanmış piksel denetimi — konsola yaz, çok düşük olmalı
+    try {
+      const finalBurned = burnedPixelPct(mat);
+      console.log('[pipeline] son yanmış piksel (>=249): ' + finalBurned.toFixed(2) + '%  '
+        + (finalBurned > 2 ? '[YUKSEK!]' : '[OK]'));
+    } catch (_) {}
 
     report(98, 'Sonuç hazırlanıyor…');
     await yieldUI();
